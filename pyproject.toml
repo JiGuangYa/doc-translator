@@ -1,0 +1,26 @@
+[project]
+name = "doc-translator"
+version = "0.2.0"
+description = "Local-only document translation service: Office + PDF, LLM-powered, with encrypted secret storage"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "ilysom0611" }]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
+ignore = [
+    "E501",  # Line length is governed by line-length and human review; CJK comments are often wide.
+    "B008",  # FastAPI idiom: Depends/File etc. are called in parameter defaults.
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Format layer uses closures to read the current loop context (flush callback);
+# values are consumed within the same iteration, so this is not a late-binding bug.
+"app/formats/*" = ["B023", "B007"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,23 @@
+# Pinned versions (reproducible builds). Evaluate each one before upgrading.
+fastapi==0.141.1
+uvicorn==0.52.4
+python-docx==1.2.0
+python-pptx==1.0.2
+openpyxl==3.1.5
+# 1.26+ no longer ships prebuilt wheels for glibc 2.17 (e.g. CentOS 7) and falls back to a source build that fails.
+pymupdf==1.25.5
+# python-pptx dependency; Pillow 11+ also lacks glibc 2.17 wheels.
+Pillow==10.4.0
+openai==3.3.1
+python-multipart==0.0.32
+
+# v0.2.0 security hardening: API-key encryption / SSRF guard / sign-in rate limit.
+keyring==25.6.0
+cryptography==43.0.3
+slowapi==0.1.9
+
+# v0.2.0 observability: Prometheus metrics + ASGI middleware.
+prometheus-client==0.21.1
+
+# Development / CI (not installed at runtime): also requires ruff, pip-audit.
+pytest==9.1.1

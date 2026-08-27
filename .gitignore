@@ -1,0 +1,14 @@
+# Runtime data (includes API key config and uploaded documents; do not commit)
+data/
+# Virtual environments
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local temporary remote-test scripts
+.tmp-remote/
+.superpowers/
+# superpowers writing plans / design docs (skill internal artifacts, not versioned)
+docs/superpowers/

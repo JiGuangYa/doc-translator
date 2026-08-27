@@ -1,0 +1,51 @@
+# doc-translator Docker Compose — Scenario A
+#
+# Default config: bound only to 127.0.0.1, can be shared by up to 5 internal users on the same host.
+# Enable Prometheus scraping: docker compose --profile metrics up
+# Stop: docker compose down (keeps the data/ volume)
+
+services:
+  app:
+    build: .
+    image: doc-translator:0.2.0
+    container_name: doc-translator
+    restart: unless-stopped
+    # Important: bind the container's port 8765 to the host's loopback interface only.
+    # For LAN access, drop the 127.0.0.1: prefix, but you must first set
+    # DOC_TRANSLATOR_REQUIRE_PUBLIC=1 and front it with a reverse-proxy TLS terminator.
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - doc-translator-data:/app/data
+    environment:
+      # See CHANGELOG.md v0.2.0; enable as needed.
+      DOC_TRANSLATOR_COOKIE_SECURE: "0"   # Set to 1 for HTTPS deployments.
+      DOC_TRANSLATOR_REQUIRE_PUBLIC: "0"  # Set to 1 when only using cloud providers.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=2).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 35s  # Give the FastAPI lifespan time to drain active tasks.
+
+  # Optional: Prometheus scrapes the /metrics endpoint.
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: doc-translator-prometheus
+    profiles: ["metrics"]
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      app:
+        condition: service_healthy
+
+volumes:
+  doc-translator-data:
+  prometheus-data:

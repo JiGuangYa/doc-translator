@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>doc-translator</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📄</text></svg>">
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="logo" href="#/workbench">📄 <span>doc-translator</span></a>
+  <nav class="tabs" id="nav" aria-label="Main navigation">
+    <a href="#/workbench" data-tab="workbench">Workbench</a>
+    <a href="#/tasks" data-tab="tasks">Tasks</a>
+    <a href="#/settings" data-tab="settings">Settings</a>
+    <button type="button" class="btn ghost logout-btn" id="logout-btn"
+            title="Sign out">Sign out</button>
+  </nav>
+</header>
+
+<main id="view"></main>
+
+<div id="toasts" aria-live="polite"></div>
+<div id="modal-root"></div>
+
+<script>
+// Global error fallback: surface any uncaught JS error so the page never goes silently blank.
+window.addEventListener('error', e => {
+  var r = document.getElementById('toasts');
+  if (!r) return;
+  var d = document.createElement('div');
+  d.className = 'toast error';
+  d.textContent = 'Page script error: ' + (e.message || e.type);
+  r.appendChild(d);
+  setTimeout(function(){ d.remove(); }, 6000);
+});
+</script>
+<script type="module">
+// Sign out: only show the button when the user is signed in (body.authed).
+const btn = document.getElementById('logout-btn');
+btn.style.display = 'none';
+new MutationObserver(() => {
+  btn.style.display = document.body.classList.contains('authed') ? '' : 'none';
+}).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+btn.addEventListener('click', async () => {
+  try { await fetch('/api/auth/logout', { method: 'POST' }); } catch { /* ignore */ }
+  document.body.classList.remove('authed');
+  location.hash = '#/login';
+});
+</script>
+<script type="module" src="/static/js/router.js"></script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-# doc-translator one-click management script (Windows PowerShell, compatible with 5.1+)
+﻿# doc-translator one-click management script (Windows PowerShell, compatible with 5.1+)
 # Usage: .\manage.ps1 {install|start|stop|restart|status|update}
 # Or run manage.bat directly (auto-bypasses the execution policy).
 # Features: idempotent (safe to re-run), PID file + health check, graceful stop, safe update.

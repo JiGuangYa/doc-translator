@@ -1,4 +1,4 @@
-# doc-translator one-click installer (Windows PowerShell)
+﻿# doc-translator one-click installer (Windows PowerShell)
 #
 # One-line install (PowerShell 5.1+):
 #   powershell -c "irm https://raw.githubusercontent.com/ilysom0611/doc-translator/main/install.ps1 | iex"

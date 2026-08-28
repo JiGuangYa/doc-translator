@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pymupdf as fitz  # noqa: E402
 
 from app.formats import pdf_fmt  # noqa: E402
+from app.formats.common import FormatAdapterError  # noqa: E402
 
 INTEGRATION_PDF = Path(r"C:\fcc\office\i2Active Oracle User Guide.pdf")
 
@@ -99,7 +100,7 @@ def test_scanned_pdf(tmp_path):
     doc.save(path)
     doc.close()
 
-    with pytest.raises(ValueError, match="(?i)scan"):
+    with pytest.raises(FormatAdapterError, match="(?i)scan"):
         pdf_fmt.extract(path, {})
 
 

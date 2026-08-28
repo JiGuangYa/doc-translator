@@ -20,6 +20,8 @@ Designed for **Scenario A: a single host on an internal network, used by up to 5
 
 It is not a multi-tenant SaaS. There is exactly one admin password and a shared in-process session store. If you need per-user accounts, quotas, or external auth, fork and extend.
 
+> **About to expose this beyond `127.0.0.1`?** Read [docs/DEPLOY.md](docs/DEPLOY.md) first. It is the single entry point for the security and reverse-proxy requirements that are otherwise spread across this README, `SECURITY.md`, and `docs/architecture.md`.
+
 ## Quick start
 
 ### Option 1: one-line install (recommended)
@@ -155,25 +157,7 @@ See [SECURITY.md](SECURITY.md) for the full threat model and reporting process.
 
 ## Data layout
 
-```
-data/
-├── config/
-│   ├── providers.json     # LLM provider list (api_key NOT stored here)
-│   ├── settings.json      # User-editable settings (source/target lang, etc.)
-│   └── admin.json         # PBKDF2 hash + salt for the admin password
-├── secrets/               # Encrypted secret store (keyring or Fernet file)
-│   ├── .salt              # 16-byte random salt
-│   ├── .master            # Fernet master key (encrypted)
-│   └── providers.json     # Encrypted secrets index
-├── tasks/<task-id>/
-│   ├── original.<ext>     # Uploaded source file
-│   ├── translated.<ext>   # Final translated file
-│   └── progress.json      # Per-batch progress checkpoint
-└── logs/
-    ├── server.log         # Service stdout
-    ├── server.err         # Service stderr
-    └── audit.jsonl        # One JSON object per sensitive action
-```
+See [docs/DEPLOY.md](docs/DEPLOY.md#data-directory-layout) for the full tree with annotations.
 
 ## Development
 
@@ -184,7 +168,7 @@ python -m ruff check app/ tests/    # Lint (E/F/W/B, line-length 100)
 
 Architecture: **FastAPI** backend + **vanilla JS** single-page frontend (no build step). Core flow is in `app/services/pipeline.py` (parse → batch → LLM → write back); format adapters live in `app/formats/`. The LLM client lives in `app/services/llm/client.py`; the central metrics registry in `app/metrics.py`; the secret store in `app/secrets_store.py`; the i18n catalog in `app/i18n/`.
 
-Contributing guide: [CONTRIBUTING.md](CONTRIBUTING.md). Architecture overview: [docs/architecture.md](docs/architecture.md). Release history: [CHANGELOG.md](CHANGELOG.md).
+Contributing guide: [CONTRIBUTING.md](CONTRIBUTING.md). Architecture overview: [docs/architecture.md](docs/architecture.md). Deployment checklist: [docs/DEPLOY.md](docs/DEPLOY.md). Release history: [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

@@ -1,9 +1,5 @@
 """Test app.secrets_store: encryption at rest with keyring + Fernet fallback."""
-import json
-from pathlib import Path
-from unittest.mock import patch
 import pytest
-from cryptography.fernet import Fernet
 
 
 @pytest.fixture

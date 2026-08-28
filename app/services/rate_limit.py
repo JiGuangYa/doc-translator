@@ -8,7 +8,6 @@ The limiter is wired into the FastAPI app via app.state.limiter in main.py
 and reused as a dependency on the login endpoint.
 """
 from slowapi import Limiter
-from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 # 5 attempts / minute / IP — high enough that a forgetful human won't

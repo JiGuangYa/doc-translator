@@ -75,10 +75,13 @@ docs/                    architecture.md (this is here, not superpowers/)
 - **Linting** is `ruff` with rules `E`, `F`, `W`, `B` and
   `line-length = 100`. Two per-file ignores are set in `pyproject.toml`
   (`B008` for FastAPI `Depends/File` defaults, `B023`/`B007` in
-  `app/formats/*` for the closure-based flush callbacks).
-- **Line length 100.** The `E501` ignore in `pyproject.toml` exists
-  because Chinese comments routinely exceed 100 characters; please
-  still keep code lines <= 100.
+  `app/formats/*` for the closure-based flush callbacks). CI runs
+  `ruff check app tests` and will fail on any rule violation; please
+  fix lint locally before pushing.
+- **Line length 100.** Keep all code and comments at or below 100
+  characters per line. The repo is English-first since v0.2.0, so the
+  old "Chinese comments routinely exceed 100" rationale no longer
+  applies.
 - **No new top-level dependencies** without discussion. Every runtime
   dependency adds a supply-chain risk and a wheel-compatibility problem
   for users on old glibc.

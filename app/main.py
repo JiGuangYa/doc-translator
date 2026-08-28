@@ -18,6 +18,7 @@ from logging.handlers import RotatingFileHandler
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -199,9 +200,6 @@ async def _unhandled(request: Request, exc: Exception):
         {"detail": "Internal server error", "request_id": rid},
         status_code=500,
     )
-
-
-from fastapi.exceptions import RequestValidationError
 
 
 @app.exception_handler(RequestValidationError)

@@ -58,5 +58,5 @@ def test_404_returns_json(anon_client):
     # body must be JSON-parseable (i.e. our handler or Starlette's JSON default)
     try:
         r.json()
-    except Exception:
-        raise AssertionError(f"expected JSON 404, got: {r.text[:200]}")
+    except Exception as e:
+        raise AssertionError(f"expected JSON 404, got: {r.text[:200]}") from e

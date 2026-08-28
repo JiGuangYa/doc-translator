@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Iterable
 
 _DEFAULT_LANG = "en"
 _LOCALES_DIR = Path(__file__).resolve().parent / "i18n"

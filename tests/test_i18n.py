@@ -25,11 +25,11 @@ def test_t_family_fallback():
 
 def test_available_languages_includes_en_and_zh():
     langs = i18n.available_languages()
-    codes = [l["code"] for l in langs]
+    codes = [lang["code"] for lang in langs]
     assert "en" in codes
     assert "zh-CN" in codes
-    for l in langs:
-        assert "code" in l and "name" in l
+    for lang in langs:
+        assert "code" in lang and "name" in lang
 
 
 def test_api_i18n_endpoint(anon_client):
@@ -54,6 +54,6 @@ def test_api_i18n_list(anon_client):
     r = anon_client.get("/api/i18n")
     assert r.status_code == 200
     body = r.json()
-    codes = [l["code"] for l in body["languages"]]
+    codes = [lang["code"] for lang in body["languages"]]
     assert "en" in codes
     assert "zh-CN" in codes

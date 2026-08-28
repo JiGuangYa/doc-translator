@@ -4,9 +4,7 @@ Scenario A (single-host) defaults to allow_private_endpoints=True so users can
 run a local llama.cpp/Ollama on 127.0.0.1. In deployments that serve only
 public providers, set DOC_TRANSLATOR_REQUIRE_PUBLIC=1 to enable the guard.
 """
-import os
 import socket
-import pytest
 
 from app.services import ssrf_guard
 

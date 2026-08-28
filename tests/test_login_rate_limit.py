@@ -1,5 +1,4 @@
 """Test login rate limit (5/minute/IP)."""
-import pytest
 
 
 def test_login_blocked_after_5_attempts(client, anon_client):
@@ -20,7 +19,7 @@ def test_rate_limit_per_ip_independent(client):
     limiter is per-IP not per-password).
     """
     # 4 failures
-    for i in range(4):
+    for _ in range(4):
         r = client.post("/api/auth/login", json={"password": "wrong"})
         # client is already logged in via cookie but that cookie is for the
         # /api/* business endpoints; login still re-validates password and

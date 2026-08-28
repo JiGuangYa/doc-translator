@@ -1,5 +1,4 @@
 """Test that session cookies respect DOC_TRANSLATOR_COOKIE_SECURE."""
-import os
 
 
 def test_cookie_secure_off_by_default(anon_client, monkeypatch):

@@ -41,9 +41,11 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 - **All 81 existing+new tests pass.** No breaking changes to API
   consumer-visible behavior other than the above.
-- The legacy `api_key_enc` field in `providers.json` is migrated and
-  removed at first startup. Operators who deploy v0.2.0 over a previous
-  install do not need to take any action.
+- 🚨 **BREAKING for direct readers of `data/config/providers.json`**: the
+  `api_key_enc` field is migrated and removed at first startup. Operators
+  who deploy v0.2.0 over a previous install do not need to take any
+  action, but any external script that read `api_key_enc` directly must
+  switch to the encrypted secret store (keyring or Fernet file).
 
 ### Known limitations
 

@@ -159,10 +159,20 @@ function Cmd-Stop {
     $storedPid = Get-StoredPid
 
     if ($null -ne $storedPid -and (Test-PidIsServer $storedPid)) {
-        Info "Stopping service (PID $storedPid)..."
-        & taskkill /PID $storedPid /T /F *> $null   # Kill the whole process tree including children.
-        if ($LASTEXITCODE -ne 0) {
-            Stop-Process -Id $storedPid -Force -ErrorAction SilentlyContinue
+        Info "Stopping service (PID $storedPid) gracefully..."
+        # Ask Python to exit via its own SIGTERM handler; the FastAPI
+        # lifespan will drain in-flight translation tasks (up to 30 s)
+        # before letting the process die. Only escalate to /T /F if
+        # the graceful window expires.
+        Stop-Process -Id $storedPid -ErrorAction SilentlyContinue
+        $waited = 0
+        while ((Get-Process -Id $storedPid -ErrorAction SilentlyContinue) -and ($waited -lt $StopTimeoutSec)) {
+            Start-Sleep -Seconds 1
+            $waited += 1
+        }
+        if (Get-Process -Id $storedPid -ErrorAction SilentlyContinue) {
+            Warn "Graceful stop timed out after ${StopTimeoutSec}s; force-killing process tree..."
+            & taskkill /PID $storedPid /T /F *> $null
         }
         $stopped = $true
     }

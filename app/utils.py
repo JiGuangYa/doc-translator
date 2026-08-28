@@ -6,6 +6,7 @@ implementation now lives in ``app.secrets_store``. The legacy codec
 needed by the one-shot migration at first v0.2.0 startup lives in
 ``app._legacy_xor`` (private — not re-exported here).
 """
+import json
 import re
 import uuid
 
@@ -44,7 +45,7 @@ def extract_json_object(text: str) -> dict | None:
     body = text[start:end + 1]
     for candidate in (body, re.sub(r",\s*([}\]])", r"\1", body)):
         try:
-            obj = __import__("json").loads(candidate)
+            obj = json.loads(candidate)
             if isinstance(obj, dict):
                 return obj
         except Exception:

@@ -1,5 +1,14 @@
 """Round-trip tests for three Office formats (docx/pptx/xlsx) extract/write_back.
 
+This single file covers all three Office formats because the fixtures and
+assertions share most of their scaffolding (open file -> extract ->
+write_back -> re-open -> compare). Splitting into test_docx_roundtrip.py /
+test_pptx_roundtrip.py / test_xlsx_roundtrip.py would duplicate the
+shared scaffolding for cosmetic gain; if a single format's tests start
+failing, the failing test name in pytest output already pinpoints the
+format and the first assert in the test names the operation (extract
+vs write_back vs round-trip).
+
 Builds small fixtures dynamically for self-containment; also includes
 integration tests against real office/ samples (skipped if missing).
 """

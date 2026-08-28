@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .. import store
 from ..formats import common
+from ..formats.common import FormatAdapterError
 from . import task_manager
 from .llm import translator
 
@@ -184,6 +185,14 @@ def _run_translation(task_id: str, ext: str, provider_id: str,
         task_manager.persist_status(task_id, status="cancelled", error=None, updated_at=_now())
         task_manager.update(task_id, status="cancelled")
         _apply_translations(task_id, ext, translations)
+        return
+    except FormatAdapterError as e:
+        # Adapter-level failure (corrupt file, missing native dep): this is
+        # not a transient outage and resume won't help. Mark as failed with
+        # a precise, user-readable message so the UI can show it verbatim.
+        msg = str(e)[:500]
+        task_manager.persist_status(task_id, status="failed", error=msg, updated_at=_now())
+        task_manager.update(task_id, status="failed", error=msg)
         return
     except Exception as e:
         msg = str(e)[:500]

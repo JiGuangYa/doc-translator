@@ -79,6 +79,14 @@ def dedupe_segments(segments: list[Segment]) -> tuple[list[Segment], dict[str, l
     return unique, alias
 
 
+class FormatAdapterError(RuntimeError):
+    """Adapter-level failure: corrupt file, missing dependency, unsupported structure.
+
+    The pipeline catches this and surfaces a clean "transient" failure to the user
+    (so resume can retry) rather than letting a low-level error bubble up.
+    """
+
+
 # ---------- registry ----------
 
 _REGISTRY: dict = {}
@@ -101,7 +109,7 @@ def get_format_handler(ext: str):
             else:
                 return None
         except ImportError as e:
-            raise RuntimeError(f"Missing dependency, cannot handle {ext} files: {e}") from e
+            raise FormatAdapterError(f"Missing dependency, cannot handle {ext} files: {e}") from e
         _REGISTRY[ext] = mod
     return _REGISTRY[ext]
 

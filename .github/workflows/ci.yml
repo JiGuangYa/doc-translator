@@ -13,6 +13,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ['3.10', '3.12']
+        # Python 3.10 is excluded on Windows because the GitHub-hosted
+        # windows-latest runner ships with a Visual C++ runtime that does
+        # not match the 3.10 wheel's expected ABI for some of our compiled
+        # dependencies (notably pymupdf 1.25). 3.12 works on both. The
+        # project supports 3.10 in production; this is a CI matrix choice,
+        # not a support statement.
         exclude:
           - os: windows-latest
             python-version: '3.10'
@@ -35,6 +41,18 @@ jobs:
 
       - name: Run tests
         run: pytest tests -q
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Coverage
+        # Coverage is reported but not gated (a future change can add a
+        # threshold). The run is best-effort: tests with a missing native
+        # dependency (e.g. pymupdf on an unusual ABI) are already skipped
+        # by pytest markers, so coverage will only count what ran.
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: |
+          pip install pytest-cov
+          pytest tests -q --cov=app --cov-report=term-missing:skip-covered
         env:
           PYTHONIOENCODING: utf-8
 

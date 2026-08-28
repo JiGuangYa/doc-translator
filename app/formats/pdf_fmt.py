@@ -153,7 +153,8 @@ def _load_segments(src: Path) -> tuple[list[Segment], int]:
     try:
         has_text = any(page.get_text().strip() for page in doc)
         if not has_text:
-            raise ValueError("This PDF has no text layer (may be a scan); translation is not supported")
+            from .common import FormatAdapterError
+            raise FormatAdapterError("This PDF has no text layer (may be a scan); translation is not supported")
         segments, rotated = _extract_pages(doc)
     finally:
         doc.close()

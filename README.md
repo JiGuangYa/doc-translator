@@ -2,7 +2,7 @@
 
 > **Local-only document translation service.** Upload a Word, PowerPoint, Excel, or PDF, translate it with **your own** LLM API, and download a file that keeps the original formatting. The two-pane web UI shows the source and the translation side by side.
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![License](https://img.shields.io/badge/License-MIT-green) ![Version](https://img.shields.io/badge/version-0.2.0-orange)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![License](https://img.shields.io/badge/License-MIT-green) ![Version](https://img.shields.io/badge/version-0.2.0-orange) ![CI](https://github.com/ilysom0611/doc-translator/actions/workflows/ci.yml/badge.svg)
 
 ## What it does
 
@@ -14,6 +14,15 @@
 - **Local only** — your documents stay on the machine in `data/`. API keys are stored encrypted (keyring with Fernet-file fallback) and never sent anywhere except the configured LLM provider.
 - **Resumable** — if the connection drops or the service restarts, translation resumes from the last checkpoint. No wasted tokens.
 
+## FAQ
+
+- **Can it translate scanned PDFs (no text layer)?** No. PDFs without a text layer need OCR first; out of scope.
+- **Can it translate math formulas?** Generally no; the LLM often mangles TeX or MathML. Treat formulas as a manual pass.
+- **Can I use Anthropic Claude / Google Gemini?** Yes if the provider exposes an OpenAI-compatible chat-completion endpoint (Anthropic's own `anthropic.com/v1` is not compatible; you need a gateway).
+- **Can I run it offline?** Yes — point `base_url` at a local Ollama / llama.cpp / vLLM server on `127.0.0.1`.
+- **Why is the LibreOffice render slow?** soffice is single-process and serialised to avoid profile-locks; for a 50-page docx + translated pair, allow 30-90 s the first time, then it's cached.
+- **Does the LLM see my data?** Yes — the segment text is sent to the LLM you configured. The service itself does not phone home.
+
 ## When to use it
 
 Designed for **Scenario A: a single host on an internal network, used by up to 5 people**. The service binds to `127.0.0.1:8765` by default. If you put it behind a reverse proxy with TLS, enable `DOC_TRANSLATOR_REQUIRE_PUBLIC=1` and `DOC_TRANSLATOR_COOKIE_SECURE=1` (see [Configuration](#configuration)).
@@ -23,6 +32,15 @@ It is not a multi-tenant SaaS. There is exactly one admin password and a shared 
 > **About to expose this beyond `127.0.0.1`?** Read [docs/DEPLOY.md](docs/DEPLOY.md) first. It is the single entry point for the security and reverse-proxy requirements that are otherwise spread across this README, `SECURITY.md`, and `docs/architecture.md`.
 
 ## Quick start
+
+### Requirements
+
+- **OS**: Linux (any modern distro), macOS, or Windows 10/11
+- **Python**: 3.10 or newer
+- **Disk**: ~500 MB for the venv + LibreOffice (if you want high-fidelity preview)
+- **RAM**: ~512 MB idle; ~1.5 GB peak while a 30-page docx is translating
+- **Network**: outbound HTTPS to your LLM provider (DeepSeek / OpenRouter / Ollama / etc.)
+- **Optional**: [LibreOffice](https://www.libreoffice.org/) for the high-fidelity server-side page render. If absent, the UI falls back to a browser-side docx preview.
 
 ### Option 1: one-line install (recommended)
 
@@ -145,6 +163,46 @@ The `stop_grace_period: 35s` setting gives the FastAPI lifespan handler time to 
 - **All `/api/*` routes require an authenticated session** except `/api/auth/*` and `/api/i18n/*`. A path-prefix allow-list (`_is_exempt`) is used instead of a hard-coded path set so new public routes can be added without a router edit.
 
 See [SECURITY.md](SECURITY.md) for the full threat model and reporting process.
+
+## Performance & limits
+
+These numbers are typical on a recent x86_64 host with 4 cores and the
+default settings (`batch_max_chars=4000`, `concurrency_batches=3`).
+Numbers vary a lot by LLM provider, document, and language pair.
+
+| Stage | Typical | Notes |
+|---|---|---|
+| Upload + parse (50-page .docx) | 1-3 s | one-time, synchronous |
+| Translation (1000 segments, EN→ZH) | 2-6 min | dominated by LLM latency |
+| Token use (1000 segments, EN→ZH) | ~50k prompt + ~70k completion | model-dependent |
+| LibreOffice render (50-page .docx) | 30-90 s | one-time per revision |
+| Incremental checkpoint | every 2 s | survives crash/restart |
+| Resume after restart | < 5 s | reads `progress.json` |
+
+Limits enforced by the service (see `app/config.py`):
+
+- `MAX_UPLOAD_MB` (default 100): per-file upload ceiling. Override via env or by editing `app/config.py` and rebuilding the image.
+- `LLM_TIMEOUT` (120 s), `LLM_MAX_RETRIES` (3), `LLM_BACKOFF_BASE` (2 s).
+- `batch_max_chars` 200-20000, `batch_max_segments` 1-100, `concurrency_batches` 1-10 (clamped at API boundary).
+- `TASK_TTL_DAYS` (30): tasks in a terminal state older than this are GC'd at startup.
+
+## Upgrading
+
+```bash
+./manage.sh update    # Linux / macOS / Git Bash
+.\manage.ps1 update   # Windows
+```
+
+The `update` command stashes local changes, fast-forwards to `main`,
+refreshes pinned dependencies in `.venv`, and restarts the service
+if it was running. The data directory is **not** touched.
+
+From 0.1.x to 0.2.0, the only breaking change for operators is the
+move of API keys from an XOR ciphertext in `providers.json` to the
+encrypted secret store. The migration is automatic on first start
+of v0.2.0; a `.bak.<timestamp>` sibling of the legacy file is
+written before the new store is populated. See
+[CHANGELOG.md](CHANGELOG.md) for the full 0.2.0 hardening notes.
 
 ## Format support
 

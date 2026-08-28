@@ -2,23 +2,45 @@
 import pytest
 
 
+class _FakeKeyring:
+    """In-memory keyring replacement.
+
+    Set on ``app.secrets_store.keyring`` via monkeypatch so the test does
+    not depend on the real ``keyring`` module being importable in the test
+    environment (some CI images lack libsecret/SecretService, in which
+    case the import would fail before any patching).
+    """
+
+    def __init__(self) -> None:
+        self.store: dict[tuple[str, str], str] = {}
+
+    def get_password(self, service: str, name: str) -> str | None:
+        return self.store.get((service, name))
+
+    def set_password(self, service: str, name: str, value: str) -> None:
+        self.store[(service, name)] = value
+
+    def delete_password(self, service: str, name: str) -> None:
+        self.store.pop((service, name), None)
+
+
+class _BoomKeyring:
+    """Pretend the keyring backend is unavailable (raises on every call)."""
+
+    def _boom(self, *_a, **_k):
+        raise RuntimeError("no keyring backend")
+
+    get_password = _boom
+    set_password = _boom
+    delete_password = _boom
+
+
 @pytest.fixture
 def fake_keyring(monkeypatch):
-    store = {}
-
-    def get_password(service, name):
-        return store.get((service, name))
-
-    def set_password(service, name, value):
-        store[(service, name)] = value
-
-    def delete_password(service, name):
-        store.pop((service, name), None)
-
-    monkeypatch.setattr("keyring.get_password", get_password)
-    monkeypatch.setattr("keyring.set_password", set_password)
-    monkeypatch.setattr("keyring.delete_password", delete_password)
-    return store
+    from app import secrets_store
+    fake = _FakeKeyring()
+    monkeypatch.setattr(secrets_store, "keyring", fake)
+    return fake.store
 
 
 def test_roundtrip_via_keyring(fake_keyring, tmp_path, monkeypatch):
@@ -46,13 +68,9 @@ def test_delete_secret(fake_keyring, tmp_path, monkeypatch):
 
 def test_fernet_fallback_when_keyring_unavailable(tmp_path, monkeypatch):
     """When keyring raises on first call, fall back to Fernet file."""
-    def _boom(*_a, **_k):
-        raise RuntimeError("no keyring backend")
-
-    monkeypatch.setattr("keyring.get_password", _boom)
-    monkeypatch.setattr("keyring.set_password", _boom)
-    monkeypatch.setattr("app.secrets_store._data_dir", lambda: tmp_path)
     from app import secrets_store
+    monkeypatch.setattr(secrets_store, "keyring", _BoomKeyring())
+    monkeypatch.setattr("app.secrets_store._data_dir", lambda: tmp_path)
     secrets_store.set_secret("k", "value-via-fernet")
     assert secrets_store.get_secret("k") == "value-via-fernet"
     # Verify file persisted

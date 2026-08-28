@@ -5,7 +5,6 @@ contain a cleartext API key, password, or session token, even if a
 future caller (or a bug in a router) passes one as a kwarg.
 """
 import json
-import re
 
 from app import auth
 

@@ -13,6 +13,9 @@ cd "$BASE_DIR"
 # avoid false-success outcomes.
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
+        if ! command -v powershell >/dev/null 2>&1; then
+            die "Git Bash detected but powershell.exe is not on PATH; run manage.ps1 or manage.bat instead"
+        fi
         exec powershell -NoProfile -ExecutionPolicy Bypass \
             -File "$BASE_DIR/manage.ps1" "$@"
         ;;

@@ -303,7 +303,7 @@ def _translate_batch_with_retry(batch, provider_id, source_lang, target_lang) ->
 
 
 def _parse_response(text: str, expected_ids: set[str]) -> dict | None:
-    from ...utils import extract_json_object
+    from app.utils import extract_json_object
     obj = extract_json_object(text)
     if not obj:
         return None

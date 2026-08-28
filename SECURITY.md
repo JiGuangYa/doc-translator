@@ -51,8 +51,15 @@ Inside that boundary, the v0.2.0 hardening addresses:
 ## Reporting a vulnerability
 
 Please **do not open a public GitHub issue** for security problems.
-Email `security@ilysom0611.dev` (or open a GitHub Security Advisory via
-the "Security" tab of the repository). Include:
+Email `security@ilysom0611.dev`, or open a GitHub Security Advisory via
+[the Security tab](https://github.com/ilysom0611/doc-translator/security/advisories/new).
+GitHub Advisories is the recommended channel because it gives you a
+private coordination thread and a CVE assignment; the email address
+exists as a backup in case the GitHub side is unreachable.
+
+The `security@ilysom0611.dev` mailbox is hosted on a paid `.dev`
+domain; if the domain lapses, the GitHub Advisory channel above
+remains the primary path. Include:
 
 1. A short description of the issue.
 2. Steps to reproduce.
@@ -86,6 +93,15 @@ Before exposing the service beyond `127.0.0.1`:
 | Fernet token        | AES-128-CBC + HMAC-SHA256 (the `cryptography` library's Fernet implementation).                     |
 | Session cookie      | Random 32-byte URL-safe value, opaque to the client.                                                |
 | Request ID          | `secrets.token_hex(16)` — 32 hex chars. Not a security token; used only for log correlation.        |
+
+## Security advisories
+
+No public security advisories have been issued for doc-translator as
+of v0.2.0. The v0.2.0 release is itself the result of a pre-release
+audit; the five P0 fixes (C1 hardening) and the six further hardening
+items (C2 + C3) are documented in [CHANGELOG.md](CHANGELOG.md) under
+the v0.2.0 heading. If a future advisory is published, it will be
+linked from this section.
 
 ## Dependency policy
 

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -24,6 +24,23 @@
 <div id="toasts" aria-live="polite"></div>
 <div id="modal-root"></div>
 
+<script>
+// Reflect the user's preferred UI language into <html lang> for screen
+// readers and browser translation. Defaults to "en"; the SPA can override
+// once the language picker has a saved choice.
+(function () {
+  var supported = ['en', 'zh-CN'];
+  var nav = (navigator.language || navigator.userLanguage || 'en').toLowerCase();
+  var pick = supported[0];
+  for (var i = 0; i < supported.length; i++) {
+    if (nav === supported[i].toLowerCase() || nav.startsWith(supported[i].toLowerCase() + '-')) {
+      pick = supported[i];
+      break;
+    }
+  }
+  document.documentElement.lang = pick;
+})();
+</script>
 <script>
 // Global error fallback: surface any uncaught JS error so the page never goes silently blank.
 window.addEventListener('error', e => {

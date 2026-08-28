@@ -70,7 +70,7 @@ Before exposing the service beyond `127.0.0.1`:
 - [ ] Set `DOC_TRANSLATOR_REQUIRE_PUBLIC=1` to enable the SSRF guard.
 - [ ] Set `DOC_TRANSLATOR_COOKIE_SECURE=1` to require the session cookie over HTTPS.
 - [ ] Front the service with a reverse proxy that terminates TLS and sets `Strict-Transport-Security`.
-- [ ] Pick an admin password of at least 12 characters from a password manager.
+- [ ] Pick an admin password of at least **12 characters** from a password manager. (The service enforces a minimum of **8** at setup time; the operator guidance here is for production deployments.)
 - [ ] Restrict the data directory (`chmod 700` on Linux; NTFS ACL on Windows).
 - [ ] Restrict the process to a dedicated low-privilege user.
 - [ ] Back up `data/config/admin.json` and `data/secrets/` together. The

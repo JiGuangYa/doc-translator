@@ -59,7 +59,7 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8765
 
 ### First-time setup
 
-1. Open http://127.0.0.1:8765 — the UI prompts you to **set the admin password** (min 8 chars).
+1. Open http://127.0.0.1:8765 — the UI prompts you to **set the admin password** (min 8 chars, 12+ recommended; see `SECURITY.md` § Hardening checklist).
 2. Go to **Settings → Providers** and add an LLM. Example for DeepSeek:
    - **Name**: `DeepSeek`
    - **Base URL**: `https://api.deepseek.com/v1`

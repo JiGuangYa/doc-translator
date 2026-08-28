@@ -114,11 +114,37 @@ def cookie_name() -> str:
 
 # ---------- audit log ----------
 
+# Keys whose values are sensitive: a caller passing these by name in the
+# audit() kwargs will have the value replaced with "[REDACTED]" before
+# it touches the on-disk JSONL. The list is intentionally conservative;
+# match the names that already exist in call sites (api_key, password,
+# token, secret, api_key_enc) plus a few obvious neighbours.
+_REDACT_KEYS = frozenset({
+    "password", "passwd", "pwd",
+    "api_key", "apikey", "key",
+    "token", "session", "session_token", "auth",
+    "secret", "credential", "credentials",
+    "api_key_enc",  # legacy XOR ciphertext
+})
+
+
+def _redact(key: str, value) -> object:
+    if key.lower() in _REDACT_KEYS and value is not None:
+        return "[REDACTED]"
+    return value
+
+
 def audit(event: str, **detail) -> None:
     """Append one audit record to data/logs/audit.jsonl. Failures are only
-    logged to the application log and do not affect the main flow."""
+    logged to the application log and do not affect the main flow.
+
+    Sensitive keyword names (see ``_REDACT_KEYS``) are replaced with
+    ``"[REDACTED]"`` so a future caller that accidentally passes
+    ``password=...`` does not leak it to the JSONL. The redaction is
+    case-insensitive on the key name.
+    """
     rec = {"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "event": event}
-    rec.update({k: v for k, v in detail.items() if v is not None})
+    rec.update({k: _redact(k, v) for k, v in detail.items() if v is not None})
     line = json.dumps(rec, ensure_ascii=False)
     try:
         AUDIT_FILE.parent.mkdir(parents=True, exist_ok=True)

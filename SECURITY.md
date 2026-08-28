@@ -21,7 +21,7 @@ Inside that boundary, the v0.2.0 hardening addresses:
 | Brute-force the admin password      | `slowapi` login rate limit: 5 attempts per minute per IP. Returns 429.                                |
 | Session cookie leaked over HTTP     | `DOC_TRANSLATOR_COOKIE_SECURE=1` makes the cookie `Secure` (off by default for the local HTTP case).   |
 | Reflected XSS / clickjacking        | Security headers: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, conservative `Content-Security-Policy`. |
-| Session fixation / CSRF             | `HttpOnly` + `SameSite=Lax` cookie; same-origin API.                                                   |
+| Session fixation / CSRF             | `HttpOnly` + `SameSite=Strict` cookie; same-origin API; Origin/Referer check on write methods (see `local_guard` in `app/main.py`). |
 | Information leak via error pages    | Global exception handler returns uniform `{detail, request_id}` JSON. Stack traces are logged, not sent. |
 | Server-side log/audit correlation    | `X-Request-ID` on every request, returned in the response and embedded in every log line.              |
 | Long-running translation orphaned on restart | FastAPI lifespan handler drains in-flight tasks on SIGTERM (30 s timeout). `docker stop` gives 35 s. |
@@ -32,10 +32,11 @@ Inside that boundary, the v0.2.0 hardening addresses:
 - **No multi-tenant isolation.** There is one admin password. If user A
   uploads a file, user B can read it. Do not deploy on a shared host
   with untrusted users.
-- **No CSRF token.** Defense is the `SameSite=Lax` cookie + same-origin
-  API. This is acceptable for a local-only deployment, but if you expose
-  the service beyond the loopback, you must add a CSRF token or
-  tighten the cookie to `SameSite=Strict`.
+- **No CSRF token.** Defense is the `SameSite=Strict` cookie + same-origin
+  API + the Origin/Referer check on write methods. This is acceptable
+  for a local-only deployment, but if you need to embed the UI in an
+  iframe on another origin, you will need to relax `SameSite` to `Lax`
+  (and add a CSRF token).
 - **No HTTPS.** The service speaks plain HTTP. Front it with a reverse
   proxy (Caddy, nginx, traefik) for any non-loopback deployment.
 - **No secrets in version control.** The `data/` directory is

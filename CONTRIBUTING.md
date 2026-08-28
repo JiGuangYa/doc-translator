@@ -70,8 +70,17 @@ docs/                    architecture.md (this is here, not superpowers/)
 
 ## Style
 
-- **Python 3.10+** syntax. `from __future__ import annotations` is fine
-  in any file. Type hints on public functions.
+- **Python 3.10+** syntax. Type hints on public functions.
+  - `from __future__ import annotations` is **required** in any module
+    that uses PEP 604 union syntax (`X | None`, `dict[str, int]`) **and**
+    runs under Python 3.10, so the annotations are evaluated lazily as
+    strings. Modules that only use 3.10+ syntax everywhere else (because
+    `target-version = "py310"` is set in `pyproject.toml`) and that have
+    no complex forward references can skip it; check the rest of the
+    module before deciding.
+  - Avoid `Optional[X]` / `Union[X, Y]` — use `X | None` / `X | Y`.
+  - Type hints are not enforced at runtime; they live for IDE help and
+    for the OpenAPI schema (FastAPI reads them on routes).
 - **Linting** is `ruff` with rules `E`, `F`, `W`, `B` and
   `line-length = 100`. Two per-file ignores are set in `pyproject.toml`
   (`B008` for FastAPI `Depends/File` defaults, `B023`/`B007` in

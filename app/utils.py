@@ -1,4 +1,11 @@
-"""Common utilities: tolerant JSON extraction, translatability checks, safe filenames."""
+"""Common utilities: tolerant JSON extraction, translatability checks, safe filenames.
+
+The v0.1.x XOR obfuscation helpers (obfuscate_secret / deobfuscate_secret)
+used to live here. They were removed in v0.2.0: the encryption-at-rest
+implementation now lives in ``app.secrets_store``. The legacy codec
+needed by the one-shot migration at first v0.2.0 startup lives in
+``app._legacy_xor`` (private — not re-exported here).
+"""
 import re
 import uuid
 
@@ -6,8 +13,6 @@ from .config import ALLOWED_EXTENSIONS
 
 # The api layer references this as utils.SUPPORTED_EXTENSIONS (explicit re-export; do not remove)
 SUPPORTED_EXTENSIONS = ALLOWED_EXTENSIONS
-
-_XOR_KEY = b"doc-translator-local-obfuscation"
 
 
 def new_task_id() -> str:
@@ -18,21 +23,6 @@ def new_task_id() -> str:
 
 def valid_task_id(task_id: str) -> bool:
     return bool(re.fullmatch(r"[0-9a-f]{32}", task_id or ""))
-
-
-def obfuscate_secret(raw: str) -> str:
-    data = bytes(raw.encode("utf-8"))
-    return (bytes(b ^ _XOR_KEY[i % len(_XOR_KEY)] for i, b in enumerate(data))).hex()
-
-
-def deobfuscate_secret(enc: str) -> str:
-    if not enc:
-        return ""
-    try:
-        data = bytes.fromhex(enc)
-        return bytes(b ^ _XOR_KEY[i % len(_XOR_KEY)] for i, b in enumerate(data)).decode("utf-8")
-    except (ValueError, UnicodeDecodeError):
-        return ""
 
 
 def extract_json_object(text: str) -> dict | None:

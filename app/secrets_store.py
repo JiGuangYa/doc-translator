@@ -24,6 +24,10 @@ from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 KEYRING_SERVICE = "doc-translator"
 _BACKEND: str | None = None  # "keyring" | "fernet"
 
@@ -190,7 +194,8 @@ def set_secret(name: str, value: str) -> None:
 
     The keyring has no native list API. To support enumeration, we always
     maintain a fernet-encrypted shadow file. If the keyring write fails, we
-    still write the fernet shadow as a fallback.
+    still write the fernet shadow as a fallback and log a warning so
+    operators notice a degraded backend.
     """
     global _BACKEND
     keyring_ok = False
@@ -198,20 +203,25 @@ def set_secret(name: str, value: str) -> None:
         try:
             keyring.set_password(KEYRING_SERVICE, name, value)
             keyring_ok = True
-        except Exception:
-            pass
+        except Exception as e:
+            # Fall through to the fernet mirror. The log entry is the only
+            # signal an operator has that the keyring backend is degraded;
+            # do not silence it.
+            logger.warning("keyring set_password failed for %r (%s: %s); falling back to fernet file",
+                           name, type(e).__name__, e)
     _fernet_set(name, value)
     if not keyring_ok and _BACKEND is None:
         # keyring failed even on probe; pin to fernet mode
         _BACKEND = "fernet"
+        logger.warning("keyring backend unavailable; using fernet-encrypted file under data/secrets/")
 
 
 def delete_secret(name: str) -> None:
     if _detect_backend() == "keyring":
         try:
             keyring.delete_password(KEYRING_SERVICE, name)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("keyring delete_password failed for %r (%s: %s)", name, type(e).__name__, e)
     _fernet_delete(name)
 
 
@@ -227,7 +237,7 @@ def migrate_legacy_xor() -> bool:
     Returns True if migration ran.
     """
     from app.config import DATA_DIR
-    from app.utils import deobfuscate_secret  # type: ignore
+    from app._legacy_xor import deobfuscate_legacy_xor  # private helper (P1-1)
     legacy = DATA_DIR / "config" / "providers.json"
     if not legacy.exists():
         return False
@@ -237,23 +247,31 @@ def migrate_legacy_xor() -> bool:
         return False
     if not isinstance(data, list):
         return False
-    migrated = False
+    migrated = 0
+    skipped = 0
     for p in data:
         enc = p.get("api_key_enc")
         if not enc:
             continue
         try:
-            plain = deobfuscate_secret(enc)
-        except Exception:
+            plain = deobfuscate_legacy_xor(enc)
+        except Exception as e:
+            skipped += 1
+            logger.warning("legacy XOR ciphertext for provider %r could not be decrypted (%s: %s); "
+                           "operator must re-enter the API key", p.get("id"), type(e).__name__, e)
             continue
         if plain:
             set_secret(p["id"], plain)
             p.pop("api_key_enc", None)
-            migrated = True
+            migrated += 1
+    if skipped:
+        logger.warning("migrate_legacy_xor: %d provider(s) had undecryptable legacy ciphertext; "
+                       "re-enter them through the UI", skipped)
     if migrated:
         import time
         ts = int(time.time())
         backup = legacy.with_suffix(f".json.bak.{ts}")
         backup.write_bytes(legacy.read_bytes())
         legacy.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-    return migrated
+        logger.info("migrate_legacy_xor: migrated %d legacy API key(s); backup at %s", migrated, backup)
+    return migrated > 0

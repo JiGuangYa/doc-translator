@@ -62,7 +62,7 @@ adheres to [Semantic Versioning](https://semver.org/).
   (Prometheus text exposition) are now anonymous. Intended for
   in-cluster scrapers / orchestrators. `docker-compose.yml` wires the
   healthcheck to `/healthz`.
-- **P0#5 — Graceful shutdown.** `app/services/task_manager.py` exposes
+- **P0#6 — Graceful shutdown.** `app/services/task_manager.py` exposes
   `count_in_flight()` and `wait_for_drain(timeout_s)`. The FastAPI
   lifespan flips a `_shutting_down` flag after `yield` and waits up to
   30 seconds for in-flight translations to finish before letting

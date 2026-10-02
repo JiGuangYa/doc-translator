@@ -1,7 +1,7 @@
 ﻿# doc-translator one-click installer (Windows PowerShell)
 #
 # One-line install (PowerShell 5.1+):
-#   powershell -c "irm https://raw.githubusercontent.com/ilysom0611/doc-translator/main/install.ps1 | iex"
+#   powershell -c "irm https://raw.githubusercontent.com/JiGuangYa/doc-translator/main/install.ps1 | iex"
 #
 # Optional environment variables:
 #   DT_DIR     Install directory (default: ~\doc-translator)
@@ -9,7 +9,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$RepoUrl  = if ($env:DT_REPO)   { $env:DT_REPO }   else { 'https://github.com/ilysom0611/doc-translator.git' }
+$RepoUrl  = if ($env:DT_REPO)   { $env:DT_REPO }   else { 'https://github.com/JiGuangYa/doc-translator.git' }
 $Branch   = if ($env:DT_BRANCH) { $env:DT_BRANCH } else { 'main' }
 $Dest     = if ($env:DT_DIR)    { $env:DT_DIR }    else { Join-Path $HOME 'doc-translator' }
 

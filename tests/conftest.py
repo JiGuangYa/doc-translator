@@ -13,6 +13,9 @@ TEST_PASSWORD = "test-pass-123"
 
 @pytest.fixture(autouse=True)
 def _auth_isolated(tmp_path, monkeypatch):
+    from app.services import task_manager
+    monkeypatch.setattr(task_manager, "_submitted", set())
+    monkeypatch.setattr(task_manager, "_jobs", {})
     from app import auth
     monkeypatch.setattr(auth, "AUTH_FILE", tmp_path / "auth.json")
     monkeypatch.setattr(auth, "AUDIT_FILE", tmp_path / "logs" / "audit.jsonl")

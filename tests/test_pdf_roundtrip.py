@@ -108,3 +108,40 @@ def test_scanned_pdf(tmp_path):
 def test_integration_extract_real_pdf():
     result = pdf_fmt.extract(INTEGRATION_PDF, {})
     assert len(result.segments) > 50
+
+
+def test_latin_revision_uses_proportional_font_even_for_chinese_target(tmp_path):
+    source = tmp_path / 'heading.pdf'
+    with fitz.open() as pdf:
+        pdf.new_page().insert_text((60, 80), 'Reading together', fontsize=24)
+        pdf.save(source)
+    output = tmp_path / 'revised.pdf'
+    result = pdf_fmt.write_back(source, output, {'s000000': 'Revised translation.'}, {'target_lang': 'zh-CN'})
+    assert result.written == 1 and not result.overflow
+    with fitz.open(output) as pdf:
+        lines = [line for block in pdf[0].get_text('dict')['blocks'] for line in block.get('lines', [])]
+        assert len(lines) == 1
+        spans = lines[0]['spans']
+        assert ''.join(span['text'] for span in spans) == 'Revised translation.'
+        assert spans[0]['font'] == 'Helvetica'
+        assert spans[0]['size'] > 12
+
+
+def test_pdf_overflow_keeps_original_text_and_pixels(tmp_path):
+    source = _make_pdf(tmp_path / 'tiny.pdf', ['Keep this original text'])
+    output = tmp_path / 'overflow.pdf'
+    result = pdf_fmt.write_back(source, output, {'s000000': 'A very long replacement. ' * 1000}, {'target_lang': 'en'})
+    assert result.written == 0 and result.overflow == ['s000000']
+    with fitz.open(source) as before, fitz.open(output) as after:
+        assert before[0].get_text() == after[0].get_text()
+        assert before[0].get_pixmap().samples == after[0].get_pixmap().samples
+
+
+def test_pdf_cjk_translation_is_committed_after_redaction(tmp_path):
+    source = _make_pdf(tmp_path / 'source.pdf', ['English original phrase'])
+    output = tmp_path / 'chinese.pdf'
+    result = pdf_fmt.write_back(source, output, {'s000000': '中文译文'}, {'target_lang': 'zh-CN'})
+    assert result.written == 1 and not result.warnings
+    with fitz.open(output) as pdf:
+        assert '中文译文' in pdf[0].get_text().replace(' ', '')
+        assert 'English original phrase' not in pdf[0].get_text()

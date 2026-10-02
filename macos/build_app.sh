@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+if [[ ! -x .venv/bin/python ]]; then
+  uv venv -p 3.12 .venv
+fi
+DIST_DIR="$(.venv/bin/python "$ROOT/macos/scripts/bundle_output.py" prepare "$ROOT")"
+uv pip install --python .venv/bin/python -r requirements.txt -r macos/requirements-build.txt
+
+# Use a full Xcode without changing the machine-wide developer selection.
+if [[ -z "${DEVELOPER_DIR:-}" ]]; then
+  for candidate in /Applications/Xcode.app/Contents/Developer /Applications/Xcode-beta.app/Contents/Developer; do
+    if [[ -d "$candidate/Platforms/MacOSX.platform" ]]; then
+      export DEVELOPER_DIR="$candidate"
+      break
+    fi
+  done
+fi
+swift build --package-path "$ROOT/macos" -c release
+BIN_DIR="$(swift build --package-path "$ROOT/macos" -c release --show-bin-path)"
+
+.venv/bin/pyinstaller --noconfirm --clean --onedir --name DocTranslatorEngine \
+  --paths "$ROOT" \
+  --add-data "$ROOT/app/i18n:app/i18n" \
+  --add-data "$ROOT/static:static" \
+  --add-data "$ROOT/pyproject.toml:." \
+  --collect-submodules app \
+  --collect-submodules keyring \
+  --collect-submodules openai \
+  --collect-submodules fitz \
+  --collect-all pymupdf \
+  --collect-submodules uvicorn \
+  --exclude-module pytest \
+  --distpath "$DIST_DIR" \
+  --workpath "$ROOT/macos/.pyinstaller" \
+  --specpath "$ROOT/macos" \
+  "$ROOT/macos/engine_launcher.py"
+
+APP_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/doc-translator-build.XXXXXX")"
+trap 'rm -rf "$APP_STAGE"' EXIT
+APP="$APP_STAGE/DocTranslator.app"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp "$BIN_DIR/DocTranslatorMac" "$APP/Contents/MacOS/DocTranslatorMac"
+ditto "$DIST_DIR/DocTranslatorEngine" "$APP/Contents/Resources/DocTranslatorEngine"
+cat > "$APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+  <key>CFBundleExecutable</key><string>DocTranslatorMac</string>
+  <key>CFBundleIdentifier</key><string>com.codex.doctranslatormac</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>文档翻译</string>
+  <key>CFBundleIconFile</key><string>DocTranslator</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.1.8</string>
+  <key>CFBundleVersion</key><string>10</string>
+  <key>CFBundleDocumentTypes</key><array><dict>
+    <key>CFBundleTypeName</key><string>可翻译文档</string>
+    <key>CFBundleTypeRole</key><string>Viewer</string>
+    <key>LSHandlerRank</key><string>Alternate</string>
+    <key>LSItemContentTypes</key><array>
+      <string>com.adobe.pdf</string>
+      <string>org.openxmlformats.wordprocessingml.document</string>
+      <string>org.openxmlformats.presentationml.presentation</string>
+      <string>org.openxmlformats.spreadsheetml.sheet</string>
+    </array>
+  </dict></array>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+</dict></plist>
+PLIST
+
+swift "$ROOT/macos/scripts/make_icon.swift" "$APP_STAGE/DocTranslator.iconset"
+iconutil -c icns "$APP_STAGE/DocTranslator.iconset" -o "$APP/Contents/Resources/DocTranslator.icns"
+cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE-doc-translator.txt"
+.venv/bin/python "$ROOT/macos/collect_licenses.py" "$APP/Contents/Resources/ThirdPartyNotices.txt"
+xattr -cr "$APP"
+codesign --force --deep --sign - "$APP"
+codesign --verify --deep --strict "$APP"
+.venv/bin/python "$ROOT/macos/scripts/bundle_output.py" publish "$APP" "$DIST_DIR"
+echo "Built $ROOT/macos/dist/DocTranslator.app"

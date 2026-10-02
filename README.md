@@ -1,8 +1,18 @@
 # doc-translator
 
+## macOS 原生版 · 0.1.8
+
+本 fork 增加了 SwiftUI 原生 macOS 应用，内置 Python 文档引擎，支持 PDF、DOCX、PPTX、XLSX 的导入、翻译、并排阅读、修订与导出。原 Web 版仍可使用。
+
+- [下载 macOS 预发布版](https://github.com/JiGuangYa/doc-translator/releases/tag/macos-v0.1.8)
+- [中文使用说明](macos/使用说明.md) · [源码构建和验收记录](macos/README.md)
+- 当前提供 Apple Silicon 构建，最低声明 macOS 14；仅在开发者当前 Mac 上验证，采用本机签名，尚未进行 Developer ID 公证。真实 API 服务由用户在应用内配置。
+
+下文为上游 Web 服务的说明；Web 引擎版本与 macOS 应用版本分别维护。
+
 > **Local-only document translation service.** Upload a Word, PowerPoint, Excel, or PDF, translate it with **your own** LLM API, and download a file that keeps the original formatting. The two-pane web UI shows the source and the translation side by side.
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![License](https://img.shields.io/badge/License-MIT-green) ![Version](https://img.shields.io/badge/version-0.2.0-orange) ![CI](https://github.com/ilysom0611/doc-translator/actions/workflows/ci.yml/badge.svg)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![License](https://img.shields.io/badge/License-MIT-green) ![Version](https://img.shields.io/badge/version-0.2.0-orange) ![CI](https://github.com/JiGuangYa/doc-translator/actions/workflows/ci.yml/badge.svg)
 
 ## What it does
 
@@ -37,6 +47,7 @@ It is not a multi-tenant SaaS. There is exactly one admin password and a shared 
 
 - **OS**: Linux (any modern distro), macOS, or Windows 10/11
 - **Python**: 3.10 or newer
+- **Linux binary dependencies**: current Pillow and cryptography wheels require glibc 2.28 or newer; legacy glibc 2.17 systems need a separately maintained source-build environment.
 - **Disk**: ~500 MB for the venv + LibreOffice (if you want high-fidelity preview)
 - **RAM**: ~512 MB idle; ~1.5 GB peak while a 30-page docx is translating
 - **Network**: outbound HTTPS to your LLM provider (DeepSeek / OpenRouter / Ollama / etc.)
@@ -48,10 +59,10 @@ Requires [git](https://git-scm.com/) and [Python 3.10+](https://www.python.org/d
 
 ```bash
 # Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/ilysom0611/doc-translator/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/JiGuangYa/doc-translator/main/install.sh | bash
 
 # Windows (PowerShell)
-powershell -c "irm https://raw.githubusercontent.com/ilysom0611/doc-translator/main/install.ps1 | iex"
+powershell -c "irm https://raw.githubusercontent.com/JiGuangYa/doc-translator/main/install.ps1 | iex"
 ```
 
 The script clones the repo to `~/doc-translator`, creates a virtualenv, and installs pinned dependencies. Then:
@@ -69,7 +80,7 @@ The service starts in the background and writes logs to `data/server.log`. Open 
 ### Option 2: run it directly
 
 ```bash
-git clone https://github.com/ilysom0611/doc-translator.git
+git clone https://github.com/JiGuangYa/doc-translator.git
 cd doc-translator
 pip install -r requirements.txt
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8765

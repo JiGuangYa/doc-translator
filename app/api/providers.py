@@ -81,7 +81,7 @@ class SettingsBody(BaseModel):
 
 @router.put("/api/settings")
 def update_settings(body: SettingsBody, request: Request):
-    data = body.model_dump(exclude_none=False)
+    data = body.model_dump(exclude_unset=True)
     # Clamp to a safe range: an oversized batch can make a single LLM response truncate,
     # losing the whole batch.
     if data.get("batch_max_chars") is not None:

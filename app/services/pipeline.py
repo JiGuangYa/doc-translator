@@ -1,6 +1,8 @@
 """Core orchestration: parse -> segment -> translate -> write back."""
 import shutil
+import os
 import time
+import uuid
 from pathlib import Path
 
 from .. import store
@@ -8,6 +10,9 @@ from ..formats import common
 from ..formats.common import FormatAdapterError
 from . import task_manager
 from .llm import translator
+
+
+_write_lock = store.task_lock
 
 
 def _now() -> str:
@@ -65,16 +70,35 @@ def parse_upload(task_id: str, filename: str, src_path: Path, options: dict) -> 
 
 def start_translation(task_id: str, provider_id: str, source_lang: str, target_lang: str) -> None:
     """Submit a translation task to the thread pool."""
+    with store.task_lock(task_id):
+        _start_translation(task_id, provider_id, source_lang, target_lang)
+
+
+def _start_translation(task_id: str, provider_id: str, source_lang: str, target_lang: str) -> None:
     job = store.load_job(task_id)
     if not job:
         raise ValueError("Task does not exist")
+    if job.get("archived"):
+        raise ValueError("Restore the archived document before starting translation")
     rt = task_manager.get_runtime(task_id) or {}
     if job.get("status") == "translating" and rt.get("status") == "translating":
         raise ValueError("Task is currently translating; do not start it again")
     if job["status"] == "done" and not _has_untranslated(job):
         return  # already fully translated
 
-    settings = store.load_settings()
+    if job.get("provider_id") and job.get("translations"):
+        previous = (job["provider_id"], job.get("source_lang", "auto"), job.get("target_lang"))
+        if previous != (provider_id, source_lang, target_lang):
+            raise ValueError("Resume must use the original provider and languages. Import a new copy to change them.")
+    provider = store.get_provider(provider_id) if provider_id != "mock" else None
+    if provider_id != "mock" and not provider:
+        raise ValueError("Translation provider no longer exists; restore the configuration to resume")
+    # Freeze non-secret configuration once per task. Editing a provider must
+    # not change the model half-way through a running or resumed document.
+    snapshot = job.get("provider_snapshot")
+    if not snapshot or job.get("provider_id") != provider_id:
+        snapshot = {key: provider[key] for key in ("id", "name", "base_url", "model")} if provider else None
+    settings = job.get("translation_settings") or store.load_settings()
     # CAS-style dedup placeholder: repeated clicks within the queueing window
     # would otherwise cause a double submission and double token burn
     if not task_manager.try_mark_submitted(task_id):
@@ -85,12 +109,18 @@ def start_translation(task_id: str, provider_id: str, source_lang: str, target_l
         "provider_id": provider_id,
         "source_lang": source_lang,
         "target_lang": target_lang,
+        "provider_snapshot": snapshot,
+        "translation_settings": settings,
         "updated_at": _now(),
     })
-    store.save_job(task_id, job)
+    try:
+        store.save_job(task_id, job)
+    except Exception:
+        task_manager.mark_finished(task_id)
+        raise
     # Synchronously mark as running: otherwise the runtime status lags behind
     # while the task is queued, creating a gap in the dedup check.
-    task_manager.update(task_id, status="translating")
+    task_manager.update(task_id, status="translating", cancel_requested=False, error=None)
 
     def run():
         try:
@@ -99,7 +129,13 @@ def start_translation(task_id: str, provider_id: str, source_lang: str, target_l
         finally:
             task_manager.mark_finished(task_id)
 
-    task_manager.submit(run, task_id)
+    try:
+        task_manager.submit(run, task_id)
+    except Exception:
+        task_manager.mark_finished(task_id)
+        task_manager.persist_status(task_id, status="failed", error="Unable to queue translation; please retry")
+        task_manager.update(task_id, status="failed")
+        raise
 
 
 def _has_untranslated(job: dict) -> bool:
@@ -119,7 +155,7 @@ def untranslated_count(job: dict) -> int:
     for s in job.get("segments") or []:
         if not s.get("translatable"):
             continue
-        cur = s.get("translation") or tr.get(s["seg_id"])
+        cur = tr.get(s["seg_id"], s.get("translation"))
         if not cur or common.is_untranslated(cur):
             n += 1
     return n
@@ -130,7 +166,7 @@ def _job_segments(job: dict) -> list[dict]:
     # Backward compat: merge the translations dict into segments
     tr = job.get("translations") or {}
     for s in segs:
-        if not s.get("translation") and tr.get(s["seg_id"]):
+        if s["seg_id"] in tr:
             s["translation"] = tr[s["seg_id"]]
     return segs
 
@@ -149,17 +185,12 @@ def _run_translation(task_id: str, ext: str, provider_id: str,
                 if s.get("translation") and not common.is_untranslated(s["translation"])}
 
     done = [0]
-    last_persist = [time.monotonic()]
 
     def on_progress(d: int, total: int, snapshot: dict | None = None):
         done[0] = d
         task_manager.update(task_id, done_segments=d, total_segments=total)
-        # Throttled incremental flush to disk every 2 seconds: large-file
-        # translation can easily take tens of minutes; without persistence,
-        # a crash/restart wipes all completed work and turns resume into a
-        # full retranslation.
-        if snapshot and time.monotonic() - last_persist[0] > 2.0:
-            last_persist[0] = time.monotonic()
+        # Persist every completed batch so reading and restart share the same checkpoint.
+        if snapshot:
 
             def mut(j: dict):
                 j_trans = j.get("translations") or {}
@@ -175,16 +206,17 @@ def _run_translation(task_id: str, ext: str, provider_id: str,
             translations = translator.translate_segments(
                 seg_objs, provider_id, source_lang, target_lang, settings,
                 existing=existing, progress_cb=on_progress,
-                cancel_check=lambda: task_manager.is_cancel_requested(task_id))
+                cancel_check=lambda: task_manager.is_cancel_requested(task_id),
+                provider_snapshot=job.get("provider_snapshot"))
     except translator.TranslationCancelled as e:
         # Cancellation must not lose work: merge any batch results that were
         # already complete at the time of cancellation, then persist.
         partial = getattr(e, "partial", None) or {}
         if partial:
             translations.update(partial)
+        _apply_translations(task_id, ext, translations)
         task_manager.persist_status(task_id, status="cancelled", error=None, updated_at=_now())
         task_manager.update(task_id, status="cancelled")
-        _apply_translations(task_id, ext, translations)
         return
     except FormatAdapterError as e:
         # Adapter-level failure (corrupt file, missing native dep): this is
@@ -203,6 +235,7 @@ def _run_translation(task_id: str, ext: str, provider_id: str,
             if job is not None:
                 job_trans = job.get("translations") or {}
                 job_trans.update(partial)
+                job["translations"] = job_trans
                 for s in _job_segments(job):
                     if job_trans.get(s["seg_id"]):
                         s["translation"] = job_trans[s["seg_id"]]
@@ -247,6 +280,11 @@ def _mock_translate(seg_objs, existing, on_progress) -> dict[str, str]:
 
 
 def _apply_translations(task_id: str, ext: str, translations: dict[str, str]) -> "common.WriteReport":
+    with _write_lock(task_id):
+        return _write_translations(task_id, ext, translations)
+
+
+def _write_translations(task_id: str, ext: str, translations: dict[str, str]) -> "common.WriteReport":
     """Invoke the format writer to write the translated file and store the
     translations dict in job.json."""
     from ..formats import common as fmt_common
@@ -255,49 +293,60 @@ def _apply_translations(task_id: str, ext: str, translations: dict[str, str]) ->
 
     clean = {k: v for k, v in translations.items() if v and not common.is_untranslated(v)}
     src = tdir / f"original{ext}"
-    dst = tdir / f"translated{ext}"
-    options = {"target_lang": job.get("target_lang"), "translate_notes": store.load_settings().get("translate_notes", True)}
+    if not job:
+        raise ValueError("Task does not exist")
+    # Commit a new immutable file by atomically replacing only job.json.
+    # Readers holding the previous job keep its file until the next startup.
+    output_name = f"outputs/{uuid.uuid4().hex}{ext}"
+    dst = tdir / output_name
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    settings = job.get("translation_settings") or store.load_settings()
+    options = {"target_lang": job.get("target_lang"), "translate_notes": settings.get("translate_notes", True)}
     handler = fmt_common.get_format_handler(ext)
-    report = handler.write_back(src, dst, clean, options)
-
-    job["translations"] = translations
-    job["status"] = job.get("status") if job.get("status") == "cancelled" else "done"
-    if report.overflow:
+    try:
+        report = handler.write_back(src, dst, clean, options)
+        with dst.open("rb") as stream:
+            os.fsync(stream.fileno())
+        job["output_file"] = output_name
+        job["translations"] = translations
+        for segment in job.get("segments", []):
+            segment["translation"] = translations.get(segment["seg_id"])
+        job["content_version"] = job.get("content_version", 0) + 1
+        if job.get("status") not in ("translating", "cancelled"):
+            job["status"] = "done"
         job["overflow"] = report.overflow
-    all_warnings = list(job.get("warnings") or []) + report.warnings
-    job["warnings"] = all_warnings
-    job["updated_at"] = _now()
-    store.save_job(task_id, job)
+        job["warnings"] = list(dict.fromkeys(list(job.get("warnings") or []) + report.warnings))
+        job["updated_at"] = _now()
+        store.save_job(task_id, job)
+    except Exception:
+        dst.unlink(missing_ok=True)
+        raise
     return report
 
 
 def revise_segment(task_id: str, seg_id: str, new_text: str) -> None:
-    """Manually revise a single segment's translation and rewrite the file."""
-    import re as _re
-    if not _re.fullmatch(r"s[0-9]{6}(#p[0-9]+)?", seg_id or ""):
+    revise_segments(task_id, {seg_id: new_text})
+
+
+def revise_segments(task_id: str, revisions: dict[str, str]) -> None:
+    """Validate the entire edit set, then regenerate and commit one output."""
+    import re
+    if not revisions:
+        raise ValueError("No revisions supplied")
+    if any(not re.fullmatch(r"s[0-9]{6}(#p[0-9]+)?", key or "") for key in revisions):
         raise ValueError("Invalid segment ID")
-    job = store.load_job(task_id)
-    if not job:
-        raise ValueError("Task does not exist")
-    rt = task_manager.get_runtime(task_id) or {}
-    if job.get("status") == "translating" and rt.get("status") == "translating":
-        # The translation thread overwrites the file wholesale; the manual
-        # edit would be clobbered by the next save.
-        raise ValueError("Task is currently translating; please wait for it to finish or cancel before editing")
-    if not any(s["seg_id"] == seg_id for s in job.get("segments", [])):
-        # No matching segment: refuse rather than silently rewriting the
-        # file with unchanged translations (P1-7).
-        raise ValueError("Segment ID not found in this task")
-    translations = job.get("translations") or {}
-    translations[seg_id] = new_text
-    job["translations"] = translations
-    for s in job.get("segments", []):
-        if s["seg_id"] == seg_id:
-            s["translation"] = new_text
-    store.save_job(task_id, job)
-    _apply_translations(task_id, job["ext"], translations)
-    # Translation changed: invalidate high-fidelity page images and re-render in the background.
-    if job["ext"] != ".pdf":
-        from . import renderer
-        (store.task_dir(task_id) / "previews" / "render.json").unlink(missing_ok=True)
-        renderer.auto_render_after_done(task_id, job["ext"])
+    with _write_lock(task_id):
+        job = store.load_job(task_id)
+        if not job:
+            raise ValueError("Task does not exist")
+        if task_manager.is_active(task_id):
+            raise ValueError("Task is currently translating; please wait for it to finish or cancel before editing")
+        ids = {s["seg_id"] for s in job.get("segments", [])}
+        if not set(revisions).issubset(ids):
+            raise ValueError("Segment ID not found in this task")
+        translations = dict(job.get("translations") or {})
+        translations.update(revisions)
+        _apply_translations(task_id, job["ext"], translations)
+        if job["ext"] != ".pdf":
+            from . import renderer
+            renderer.auto_render_after_done(task_id, job["ext"])

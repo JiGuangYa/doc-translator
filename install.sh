@@ -2,8 +2,8 @@
 # doc-translator one-click installer (Linux / macOS)
 #
 # One-line install (curl or wget):
-#   curl -fsSL https://raw.githubusercontent.com/ilysom0611/doc-translator/main/install.sh | bash
-#   wget -qO- https://raw.githubusercontent.com/ilysom0611/doc-translator/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/JiGuangYa/doc-translator/main/install.sh | bash
+#   wget -qO- https://raw.githubusercontent.com/JiGuangYa/doc-translator/main/install.sh | bash
 #
 # Optional environment variables:
 #   DT_DIR=~/doc-translator    Install directory (default: ~/doc-translator)
@@ -11,7 +11,7 @@
 #   DT_START=1                 Start the service in the background after install (default: 0, install only)
 set -Eeuo pipefail
 
-REPO_URL="${DT_REPO:-https://github.com/ilysom0611/doc-translator.git}"
+REPO_URL="${DT_REPO:-https://github.com/JiGuangYa/doc-translator.git}"
 BRANCH="${DT_BRANCH:-main}"
 DEST="${DT_DIR:-$HOME/doc-translator}"
 

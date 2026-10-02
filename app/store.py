@@ -7,20 +7,41 @@ Legacy XOR ciphertext is migrated one-shot at lifespan startup by
 secrets_store.migrate_legacy_xor.
 """
 import json
+import os
+import re
+import shutil
+import tempfile
 import threading
 from pathlib import Path
 
 from . import config
 from .secrets_store import get_secret, set_secret, delete_secret, list_secret_names
 
-_lock = threading.Lock()
+_lock = threading.RLock()  # Provider deletion also saves defaults under this lock.
+_task_locks: dict[str, threading.RLock] = {}
+_task_locks_guard = threading.Lock()
+
+
+def task_lock(task_id: str):
+    """Serialize a task's lifecycle and commits; never acquire under _lock."""
+    with _task_locks_guard:
+        return _task_locks.setdefault(task_id, threading.RLock())
 
 
 def _atomic_write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=f".{path.name}.", suffix=".tmp", delete=False) as stream:
+            tmp = Path(stream.name)
+            json.dump(data, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        tmp.replace(path)
+    finally:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
 
 
 def _read_json(path: Path, default):
@@ -186,13 +207,46 @@ def task_dir(task_id: str) -> Path:
     return config.TASKS_DIR / task_id
 
 
+def document_path(job: dict, variant: str) -> Path:
+    """The job record commits an immutable output; legacy files stay readable."""
+    if variant not in ("original", "translated"):
+        raise ValueError("Invalid document variant")
+    output = job.get("output_file") if variant == "translated" else None
+    if output:
+        if not re.fullmatch(r"outputs/[0-9a-f]{32}\.(pdf|docx|pptx|xlsx)", output):
+            raise ValueError("Invalid saved output path")
+        return task_dir(job["task_id"]) / output
+    return task_dir(job["task_id"]) / f"{variant}{job['ext']}"
+
+
+def recover_task_files() -> None:
+    """Reclaim uncommitted/old generations only at startup, before any readers.
+
+    A crash before job.json is replaced leaves an orphan output, never a
+    partially committed revision. Keep unknown/corrupt tasks untouched.
+    """
+    for job in list_jobs():
+        with task_lock(job["task_id"]):
+            current = document_path(job, "translated")
+            if job.get("output_file") and not current.is_file():
+                continue
+            folder = task_dir(job["task_id"])
+            for output in (folder / "outputs").glob("*"):
+                if output.is_file() and re.fullmatch(r"[0-9a-f]{32}\.(pdf|docx|pptx|xlsx)", output.name) and output != current:
+                    output.unlink(missing_ok=True)
+            version = f"v{job.get('content_version', 0)}"
+            for cached in (folder / "previews").glob("v*"):
+                if cached.is_dir() and re.fullmatch(r"v[0-9]+", cached.name) and cached.name != version:
+                    shutil.rmtree(cached)
+
+
 def load_job(task_id: str) -> dict | None:
     job = _read_json(task_dir(task_id) / "job.json", None)
     return job
 
 
 def save_job(task_id: str, job: dict) -> None:
-    with _lock:
+    with task_lock(task_id), _lock:
         _atomic_write_json(task_dir(task_id) / "job.json", job)
 
 
@@ -205,7 +259,7 @@ def update_job(task_id: str, mutator) -> dict | None:
     this interface. mutator(job) modifies in place; returns None if task
     does not exist.
     """
-    with _lock:
+    with task_lock(task_id), _lock:
         path = task_dir(task_id) / "job.json"
         job = _read_json(path, None)
         if not job:
@@ -230,12 +284,15 @@ def list_jobs() -> list[dict]:
 
 
 def delete_task(task_id: str) -> bool:
-    d = task_dir(task_id)
-    if not d.exists():
-        return False
-    import shutil
-    shutil.rmtree(d, ignore_errors=True)
-    return True
+    from .services import task_manager
+    with task_lock(task_id):
+        if task_manager.is_active(task_id):
+            raise ValueError("Task is currently translating; cancel it and wait before deleting")
+        d = task_dir(task_id)
+        if not d.exists():
+            return False
+        shutil.rmtree(d)
+        return True
 
 
 _TERMINAL_STATUSES = {"done", "cancelled", "failed"}

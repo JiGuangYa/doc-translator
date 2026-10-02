@@ -14,6 +14,7 @@ import os
 import platform
 import secrets
 import socket
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -34,7 +35,30 @@ _BACKEND: str | None = None  # "keyring" | "fernet"
 # Single lock for all secret-store mutations: prevents the
 # _detect_backend() / _fernet_* TOCTOU race that could lose concurrent
 # provider writes or write ciphertext to the wrong slot.
-_lock = threading.Lock()
+_lock = threading.RLock()
+
+
+def _write_secrets(path: Path, data: dict) -> None:
+    """An interrupted write must leave the previous encrypted store intact."""
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as f:
+            temporary = Path(f.name)
+            os.chmod(temporary, 0o600)
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _secret_record(name: str):
+    path = _secrets_dir() / "providers.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text()).get(name)
 
 
 def _data_dir() -> Path:
@@ -124,6 +148,8 @@ def _fernet_get(name: str) -> Optional[str]:
         except (OSError, json.JSONDecodeError):
             return None
         enc = data.get(name)
+        if isinstance(enc, dict):
+            enc = enc.get("ciphertext")
         if not enc:
             return None
         try:
@@ -132,7 +158,7 @@ def _fernet_get(name: str) -> Optional[str]:
             return None
 
 
-def _fernet_set(name: str, value: str) -> None:
+def _fernet_set(name: str, value: str, *, keyring_current: bool = False) -> None:
     # The read-modify-write of providers.json must be atomic; otherwise
     # two simultaneous providers created from racing requests can
     # silently overwrite each other. _load_or_create_fernet is also
@@ -142,18 +168,13 @@ def _fernet_set(name: str, value: str) -> None:
     with _lock:
         path = _secrets_dir() / "providers.json"
         if path.exists():
-            try:
-                data = json.loads(path.read_text())
-            except (OSError, json.JSONDecodeError):
-                data = {}
+            # Refuse to overwrite an unreadable store and lose other keys.
+            data = json.loads(path.read_text())
         else:
             data = {}
-        data[name] = _load_or_create_fernet().encrypt(value.encode()).decode()
-        path.write_text(json.dumps(data, indent=2))
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
+        data[name] = {"ciphertext": _load_or_create_fernet().encrypt(value.encode()).decode(),
+                      "keyring_current": keyring_current}
+        _write_secrets(path, data)
 
 
 def _fernet_delete(name: str) -> None:
@@ -166,7 +187,7 @@ def _fernet_delete(name: str) -> None:
         except (OSError, json.JSONDecodeError):
             return
         data.pop(name, None)
-        path.write_text(json.dumps(data, indent=2))
+        _write_secrets(path, data)
 
 
 def _fernet_list() -> list[str]:
@@ -181,12 +202,23 @@ def _fernet_list() -> list[str]:
 
 
 def get_secret(name: str) -> Optional[str]:
-    if _detect_backend() == "keyring":
+    with _lock:
         try:
-            return keyring.get_password(KEYRING_SERVICE, name)
-        except Exception:
-            pass
-    return _fernet_get(name)
+            record = _secret_record(name)
+        except (OSError, json.JSONDecodeError):
+            record = None
+        # Remember failed Keychain writes across process restarts. A readable
+        # but stale Keychain item must not override the newly saved fallback.
+        if isinstance(record, dict) and not record.get("keyring_current", False):
+            return _fernet_get(name)
+        if _detect_backend() == "keyring":
+            try:
+                value = keyring.get_password(KEYRING_SERVICE, name)
+                if value is not None:
+                    return value
+            except Exception:
+                pass
+        return _fernet_get(name)
 
 
 def set_secret(name: str, value: str) -> None:
@@ -197,32 +229,32 @@ def set_secret(name: str, value: str) -> None:
     still write the fernet shadow as a fallback and log a warning so
     operators notice a degraded backend.
     """
-    global _BACKEND
-    keyring_ok = False
-    if _detect_backend() == "keyring":
-        try:
-            keyring.set_password(KEYRING_SERVICE, name, value)
-            keyring_ok = True
-        except Exception as e:
-            # Fall through to the fernet mirror. The log entry is the only
-            # signal an operator has that the keyring backend is degraded;
-            # do not silence it.
-            logger.warning("keyring set_password failed for %r (%s: %s); falling back to fernet file",
-                           name, type(e).__name__, e)
-    _fernet_set(name, value)
-    if not keyring_ok and _BACKEND is None:
-        # keyring failed even on probe; pin to fernet mode
-        _BACKEND = "fernet"
-        logger.warning("keyring backend unavailable; using fernet-encrypted file under data/secrets/")
+    with _lock:
+        # Commit the encrypted fallback first. If the process exits during a
+        # Keychain prompt, the latest value is still recoverable on restart.
+        _fernet_set(name, value, keyring_current=False)
+        if _detect_backend() == "keyring":
+            try:
+                keyring.set_password(KEYRING_SERVICE, name, value)
+            except Exception as e:
+                logger.warning("keyring write failed for %r (%s); using encrypted fallback", name, type(e).__name__)
+            else:
+                try:
+                    _fernet_set(name, value, keyring_current=True)
+                except OSError:
+                    # The new value is already durable in the fallback; a failed
+                    # preference update must not report the whole save as failed.
+                    logger.warning("keyring preference update failed for %r; retaining encrypted fallback", name)
 
 
 def delete_secret(name: str) -> None:
-    if _detect_backend() == "keyring":
-        try:
-            keyring.delete_password(KEYRING_SERVICE, name)
-        except Exception as e:
-            logger.warning("keyring delete_password failed for %r (%s: %s)", name, type(e).__name__, e)
-    _fernet_delete(name)
+    with _lock:
+        if _detect_backend() == "keyring":
+            try:
+                keyring.delete_password(KEYRING_SERVICE, name)
+            except Exception as e:
+                logger.warning("keyring delete failed for %r (%s)", name, type(e).__name__)
+        _fernet_delete(name)
 
 
 def list_secret_names() -> list[str]:

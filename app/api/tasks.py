@@ -39,6 +39,7 @@ def _summary(job: dict) -> dict:
         "filename": job["filename"],
         "ext": job["ext"],
         "status": job.get("status"),
+        "archived": job.get("archived", False),
         "created_at": job.get("created_at"),
         "segment_count": job.get("segment_count"),
         "total_chars": job.get("total_chars"),
@@ -46,12 +47,15 @@ def _summary(job: dict) -> dict:
         "source_lang": job.get("source_lang"),
         "target_lang": job.get("target_lang"),
         "provider_id": job.get("provider_id"),
+        "provider_snapshot": job.get("provider_snapshot"),
+        "content_version": job.get("content_version", 0),
         "error": job.get("error"),
         "warnings": job.get("warnings") or [],
+        "overflow_count": len(job.get("overflow") or []),
         "untranslated_count": pipeline.untranslated_count(job),
         "done_segments": rt.get("done_segments", len([s for s in (job.get("translations") or {})])),
         "total_segments": rt.get("total_segments", job.get("segment_count")),
-        "has_translated": (store.task_dir(job["task_id"]) / f"translated{job['ext']}").exists(),
+        "has_translated": store.document_path(job, "translated").exists(),
     }
 
 
@@ -140,7 +144,7 @@ def segments(task_id: str, filter: str = "all"):
     tr = job.get("translations") or {}
     out = []
     for s in job.get("segments", []):
-        translation = s.get("translation") or tr.get(s["seg_id"])
+        translation = tr.get(s["seg_id"], s.get("translation"))
         if filter == "untranslated" and (not s["translatable"] or (translation and not is_untranslated(translation))):
             continue
         out.append({
@@ -156,6 +160,21 @@ def segments(task_id: str, filter: str = "all"):
 
 class ReviseBody(BaseModel):
     text: str
+
+
+class BulkReviseBody(BaseModel):
+    revisions: dict[str, str]
+
+
+@router.patch("/api/tasks/{task_id}/segments")
+def revise_segments(task_id: str, body: BulkReviseBody, request: Request):
+    _check_task(task_id)
+    try:
+        pipeline.revise_segments(task_id, body.revisions)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    auth.audit("segments_revise", task_id=task_id, count=len(body.revisions), ip=_ip(request))
+    return {"ok": True}
 
 
 @router.patch("/api/tasks/{task_id}/segments/{seg_id}")
@@ -179,7 +198,7 @@ def download(task_id: str, variant: str = "translated"):
     job = _check_task(task_id)
     variant = _check_variant(variant)
     ext = job["ext"]
-    path = store.task_dir(task_id) / f"{variant}{ext}"
+    path = store.document_path(job, variant)
     if not path.exists():
         raise HTTPException(404, "File does not exist (translation not finished yet?)")
     stem = utils.sanitize_filename(Path(job["filename"]).stem)
@@ -195,7 +214,7 @@ def raw_file(task_id: str, variant: str = "translated"):
     """Stream the raw file for direct fetch by frontend preview libraries."""
     job = _check_task(task_id)
     variant = _check_variant(variant)
-    path = store.task_dir(task_id) / f"{variant}{job['ext']}"
+    path = store.document_path(job, variant)
     if not path.exists():
         raise HTTPException(404, "File does not exist")
     return FileResponse(path)
@@ -213,8 +232,26 @@ def cancel(task_id: str, request: Request):
 @router.delete("/api/tasks/{task_id}")
 def delete(task_id: str, request: Request):
     job = _check_task(task_id)
-    ok = store.delete_task(task_id)
+    try:
+        ok = store.delete_task(task_id)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
     if ok:
         auth.audit("task_delete", task_id=task_id, filename=job.get("filename"),
                    ip=_ip(request))
     return {"ok": ok}
+
+
+class ArchiveBody(BaseModel):
+    archived: bool
+
+
+@router.patch("/api/tasks/{task_id}")
+def archive(task_id: str, body: ArchiveBody, request: Request):
+    with store.task_lock(task_id):
+        _check_task(task_id)
+        if task_manager.is_active(task_id):
+            raise HTTPException(409, "Wait for translation to finish or cancel before archiving")
+        job = store.update_job(task_id, lambda j: j.update(archived=body.archived))
+    auth.audit("task_archive" if body.archived else "task_restore", task_id=task_id, ip=_ip(request))
+    return _summary(job)

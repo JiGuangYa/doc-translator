@@ -1,9 +1,10 @@
 """Path constants and global configuration."""
+import os
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent      # project root doc-translator/
+BASE_DIR = Path(os.environ.get("DOC_TRANSLATOR_RESOURCE_DIR", Path(__file__).resolve().parent.parent))
 APP_DIR = BASE_DIR / "app"
-DATA_DIR = BASE_DIR / "data"
+DATA_DIR = Path(os.environ.get("DOC_TRANSLATOR_DATA_DIR", BASE_DIR / "data"))
 CONFIG_DIR = DATA_DIR / "config"
 TASKS_DIR = DATA_DIR / "tasks"
 STATIC_DIR = BASE_DIR / "static"
@@ -15,7 +16,7 @@ for d in (DATA_DIR, CONFIG_DIR, TASKS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 HOST = "127.0.0.1"
-PORT = 8765
+PORT = int(os.environ.get("PORT", "8765"))
 
 MAX_UPLOAD_MB = 100
 ALLOWED_EXTENSIONS = {".docx", ".pptx", ".xlsx", ".pdf"}
@@ -32,4 +33,4 @@ MAX_CONSECUTIVE_BATCH_FAILURES = 3
 
 # Task TTL: tasks in a terminal state (done/cancelled/failed) older than this many
 # days are cleaned up at startup; 0 disables cleanup.
-TASK_TTL_DAYS = 30
+TASK_TTL_DAYS = int(os.environ.get("DOC_TRANSLATOR_TASK_TTL_DAYS", "30"))

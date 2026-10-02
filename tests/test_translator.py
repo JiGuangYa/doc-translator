@@ -24,6 +24,19 @@ def test_alias_merge_does_not_mutate_during_iteration(monkeypatch):
     assert out["s000002"] == "T:World"
 
 
+def test_progress_counts_original_paragraphs_after_dedup_and_splitting(monkeypatch):
+    segments = _segs('Same short text', 'Same short text', 'Long sentence. ' * 80)
+    progress = []
+    monkeypatch.setattr(tr, '_translate_batch_with_retry',
+                        lambda batch, *a, **kw: {s.seg_id: 'translated' for s in batch})
+    tr.translate_segments(segments, 'p', 'auto', 'en',
+                          {'batch_max_chars': 200, 'batch_max_segments': 1, 'concurrency_batches': 3},
+                          progress_cb=lambda done, total, snapshot: progress.append((done, total, len(snapshot))))
+    assert progress[-1] == (3, 3, 3)
+    assert all(done <= total and done == size for done, total, size in progress)
+    assert [p[0] for p in progress] == sorted(p[0] for p in progress)
+
+
 def test_existing_translations_are_kept(monkeypatch):
     """Resume translation: segments that already have an entry in `existing`
     are not re-sent."""
@@ -239,7 +252,7 @@ def test_retry_after_header_honored(monkeypatch):
     def fake_create(**kwargs):
         raise FakeRateLimit("rate limited")
 
-    cl = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)))
+    cl = SimpleNamespace(close=lambda: None, chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)))
     monkeypatch.setattr(tr.client, "build_client", lambda pid: (cl, "m"))
 
     from app.formats.common import Segment

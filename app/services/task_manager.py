@@ -56,6 +56,12 @@ def update(task_id: str, **fields) -> None:
         rt.update(fields)
 
 
+def request_cancel_all() -> None:
+    with _lock:
+        for rt in _jobs.values():
+            rt["cancel_requested"] = True
+
+
 def request_cancel(task_id: str) -> bool:
     with _lock:
         rt = _jobs.get(task_id)
@@ -88,6 +94,12 @@ def try_mark_submitted(task_id: str) -> bool:
 def mark_finished(task_id: str) -> None:
     with _lock:
         _submitted.discard(task_id)
+
+
+def is_active(task_id: str) -> bool:
+    """Includes queued work and the final export after cancellation."""
+    with _lock:
+        return task_id in _submitted or _jobs.get(task_id, {}).get("status") == "translating"
 
 
 def submit(fn, task_id: str) -> None:

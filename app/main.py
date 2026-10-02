@@ -26,7 +26,7 @@ from slowapi.errors import RateLimitExceeded
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
-from . import auth, config, i18n, store
+from . import auth, config, desktop, i18n, store
 from . import secrets_store
 from .api import auth as auth_api
 from .api import previews, providers, tasks
@@ -148,6 +148,7 @@ async def lifespan(app: FastAPI):
     # v0.2.0: one-time migration of legacy XOR ciphertext in providers.json to secrets_store.
     if secrets_store.migrate_legacy_xor():
         logging.info("Migrated legacy provider API keys from XOR ciphertext to encrypted key store")
+    store.recover_task_files()
     task_manager.recover_on_startup()
     renderer.recover_stale()
     removed = store.gc_old_tasks(config.TASK_TTL_DAYS)
@@ -253,6 +254,10 @@ async def local_guard(request: Request, call_next):
     # Cookie validation runs after Origin checks so cross-site writes are rejected first
     # without burning a session lookup.
     path = request.url.path
+    if desktop.enabled():
+        if not desktop.authenticated(request.headers.get("X-DocTranslator-Token", "")):
+            return JSONResponse({"detail": "Invalid desktop session"}, status_code=401)
+        return await call_next(request)
     if path.startswith("/api/") and not _is_exempt(path):
         token = request.cookies.get(auth.cookie_name())
         if not auth.validate_session(token):

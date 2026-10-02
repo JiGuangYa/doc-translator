@@ -8,9 +8,9 @@ from ... import metrics
 from .. import ssrf_guard
 
 
-def build_client(provider_id: str) -> tuple[OpenAI, str]:
+def build_client(provider_id: str, provider_snapshot: dict | None = None) -> tuple[OpenAI, str]:
     """Return (client, model). Raises ValueError if the provider does not exist."""
-    provider = store.get_provider(provider_id)
+    provider = provider_snapshot or store.get_provider(provider_id)
     if not provider:
         raise ValueError(f"Translation model provider {provider_id} does not exist")
     # Re-validate at construction time: a base_url that was safe when stored may
@@ -35,7 +35,7 @@ def build_client(provider_id: str) -> tuple[OpenAI, str]:
     return client, provider["model"]
 
 
-def chat_completion_with_metrics(provider_id: str, **kwargs):
+def chat_completion_with_metrics(provider_id: str, *, provider_snapshot: dict | None = None, **kwargs):
     """Wrap OpenAI chat.completions.create with Prometheus metrics.
 
     Records:
@@ -46,7 +46,7 @@ def chat_completion_with_metrics(provider_id: str, **kwargs):
     The caller can pass any keyword arguments the OpenAI SDK accepts.
     Returns the response object on success, re-raises on failure.
     """
-    cl, model = build_client(provider_id)
+    cl, model = build_client(provider_id, provider_snapshot) if provider_snapshot else build_client(provider_id)
     kwargs.setdefault("model", model)
     start = time.perf_counter()
     try:
@@ -56,6 +56,8 @@ def chat_completion_with_metrics(provider_id: str, **kwargs):
         metrics.llm_calls_total.labels(provider=provider_id, status="error").inc()
         metrics.llm_request_duration_seconds.labels(provider=provider_id).observe(elapsed)
         raise
+    finally:
+        cl.close()
     elapsed = time.perf_counter() - start
     metrics.llm_calls_total.labels(provider=provider_id, status="ok").inc()
     metrics.llm_request_duration_seconds.labels(provider=provider_id).observe(elapsed)

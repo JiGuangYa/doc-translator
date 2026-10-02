@@ -123,12 +123,12 @@ def make_batches(segments: list, max_chars: int, max_count: int) -> list[list]:
 
 def translate_segments(segments: list, provider_id: str, source_lang: str, target_lang: str,
                        settings: dict, existing: dict[str, str] | None = None,
-                       progress_cb=None, cancel_check=None) -> dict[str, str]:
+                       progress_cb=None, cancel_check=None, provider_snapshot: dict | None = None) -> dict[str, str]:
     """Translate a batch of segments, returning {seg_id: translation} (including any pre-existing ones).
 
     - Same-source dedup: identical source text is sent for translation only once.
     - Resume: seg_ids already in `existing` are skipped.
-    - progress_cb(done, total, snapshot): counts unique segments; snapshot is the cumulative
+    - progress_cb(done, total, snapshot): counts complete original segments; snapshot is the cumulative
       set of new translations (with alias expansion) so the caller can periodically persist.
       On crash, the persisted portion can be used to resume.
     - cancel_check() returning True raises TranslationCancelled between batches (carries
@@ -152,7 +152,7 @@ def translate_segments(segments: list, provider_id: str, source_lang: str, targe
     concurrency = max(1, int(settings.get("concurrency_batches", 3)))
 
     lock = threading.Lock()
-    done_count = len(existing)
+    report_lock = threading.Lock()
     total = len(existing) + len(todo)
     batch_outputs: list[dict] = []  # Each thread appends {seg_id: translation}; merged on read.
 
@@ -174,30 +174,32 @@ def translate_segments(segments: list, provider_id: str, source_lang: str, targe
     def partial_results() -> dict[str, str]:
         with lock:
             merged = _merge_outputs_locked()
-        return _expand_aliases(merged)
+        return _expand_aliases(_reassemble_pieces(merged, piece_map))
 
-    def report(delta: int):
-        nonlocal done_count
-        with lock:
-            done_count += delta
-            snap = dict(_merge_outputs_locked()) if progress_cb else None
-            d, t = done_count, total
-        # Run the callback outside the lock — callbacks may do disk IO (incremental persist)
-        # and we don't want them to block other threads.
-        if progress_cb:
-            progress_cb(d, t, _expand_aliases(snap))
+    def report():
+        if not progress_cb:
+            return
+        # Count complete original paragraphs, not split pieces or requests.
+        # Serialize checkpoint callbacks so a slower earlier write cannot
+        # move the progress counter backwards under concurrent batches.
+        with report_lock:
+            with lock:
+                snap = dict(_merge_outputs_locked())
+            snap = _expand_aliases(_reassemble_pieces(snap, piece_map))
+            progress_cb(len(existing) + len(snap), total, snap)
 
     def run_batch(batch) -> bool:
         """Returns success status; failures do not raise (the wave-level tally decides whether to abort)."""
         if cancel_check and cancel_check():
             raise TranslationCancelled()
-        translated = _translate_batch_with_retry(batch, provider_id, source_lang, target_lang)
+        translated = _translate_batch_with_retry(batch, provider_id, source_lang, target_lang,
+                                                  provider_snapshot=provider_snapshot)
         if not translated:
-            report(0)
+            report()
             return False
         with lock:
             batch_outputs.append(translated)
-        report(len(batch))
+        report()
         return True
 
     # Wave-level concurrency: each wave runs up to `concurrency` batches in parallel; the
@@ -260,7 +262,7 @@ def _retry_after_seconds(e: Exception) -> float | None:
     return v if v >= 0 else None
 
 
-def _translate_batch_with_retry(batch, provider_id, source_lang, target_lang) -> dict[str, str] | None:
+def _translate_batch_with_retry(batch, provider_id, source_lang, target_lang, provider_snapshot=None) -> dict[str, str] | None:
     """Translate a single batch with three layers of fault tolerance. Returns None when all
     layers fail (caller counts failures).
 
@@ -274,6 +276,7 @@ def _translate_batch_with_retry(batch, provider_id, source_lang, target_lang) ->
         try:
             resp = client.chat_completion_with_metrics(
                 provider_id,
+                provider_snapshot=provider_snapshot,
                 temperature=0.1,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
@@ -284,7 +287,7 @@ def _translate_batch_with_retry(batch, provider_id, source_lang, target_lang) ->
             )
             parsed = _parse_response(resp.choices[0].message.content or "", set(payload))
             if parsed is not None:
-                return _fill_missing(parsed, batch, provider_id, source_lang, target_lang)
+                return _fill_missing(parsed, batch, provider_id, source_lang, target_lang, provider_snapshot)
             last_error = "Response is not valid JSON"
             # Occasional truncation can recover on retry — same backoff + jitter applies.
             time.sleep(min(config.LLM_BACKOFF_BASE * (2 ** attempt) * random.uniform(0.7, 1.3), 60))
@@ -310,7 +313,7 @@ def _parse_response(text: str, expected_ids: set[str]) -> dict | None:
     return {k: v for k, v in obj.items() if k in expected_ids and isinstance(v, str) and v.strip()}
 
 
-def _fill_missing(parsed: dict, batch, provider_id, source_lang, target_lang) -> dict[str, str]:
+def _fill_missing(parsed: dict, batch, provider_id, source_lang, target_lang, provider_snapshot=None) -> dict[str, str]:
     """At most two rescue passes for missing ids: full-batch with missing list, then small-group retry."""
     result = dict(parsed)
     missing = [s for s in batch if s.seg_id not in result]
@@ -322,6 +325,7 @@ def _fill_missing(parsed: dict, batch, provider_id, source_lang, target_lang) ->
         payload = {s.seg_id: s.text for s in batch}
         resp = client.chat_completion_with_metrics(
             provider_id,
+            provider_snapshot=provider_snapshot,
             temperature=0.1,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -345,6 +349,7 @@ def _fill_missing(parsed: dict, batch, provider_id, source_lang, target_lang) ->
                 try:
                     resp = client.chat_completion_with_metrics(
                         provider_id,
+                        provider_snapshot=provider_snapshot,
                         temperature=0.1,
                         messages=[
                             {"role": "system", "content": SYSTEM_PROMPT},

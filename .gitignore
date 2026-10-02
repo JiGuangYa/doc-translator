@@ -12,3 +12,10 @@ __pycache__/
 .superpowers/
 # superpowers writing plans / design docs (skill internal artifacts, not versioned)
 docs/superpowers/
+
+# Native build artifacts
+macos/.build/
+macos/.pyinstaller/
+macos/dist
+macos/*.spec
+macos/qa-output/

@@ -27,7 +27,11 @@ _RECT_PAD = 1.0           # padding around the write rectangle (pt)
 _CJK_FONTS = {"zh": "china-s", "ja": "japan", "ko": "korea"}
 
 
-def _pick_font(target_lang: str | None) -> str:
+def _pick_font(target_lang: str | None, text: str | None = None) -> str:
+    # The user may revise a Chinese-target segment back to Latin text.
+    # Built-in CJK PDF fonts use full-width Latin metrics in insert_textbox.
+    if text is not None and all(ord(char) < 256 for char in text):
+        return "helv"
     lang = (target_lang or "").lower()
     for prefix, font in _CJK_FONTS.items():
         if lang.startswith(prefix):
@@ -177,77 +181,22 @@ def extract(path: Path, options: dict) -> ExtractResult:
 
 # ---------- write-back ----------
 
-def _count_wrapped_lines(text: str, width: float, size: float, font: "fitz.Font") -> int:
-    """Reimplements Shape.insert_textbox's greedy line-wrapping algorithm to
-    estimate the line count precisely.
+def _prepare_fitted(page, rect: fitz.Rect, text: str, fontname: str,
+                    size: float, rgb: tuple):
+    """Lay out an uncommitted shape before removing any source text.
 
-    Same as PyMuPDF: split by spaces, fit words into lines; words too long
-    for one line are broken character by character.
+    Use the writer's actual font metrics, rather than an estimate that can
+    disagree with CJK wrapping. A failed fit leaves the source untouched.
     """
-    blen = font.text_length(" ", size) or size  # space width (CJK font falls back to font size)
-    nlines = 0
-    for src_line in (text.splitlines() or [""]):
-        rest = width
-        lbuff = ""
-        for word in src_line.expandtabs().split(" "):
-            pl_w = font.text_length(word, size)
-            if rest >= pl_w:  # current line still has room
-                lbuff += word + " "
-                rest -= pl_w + blen
-                continue
-            if lbuff:  # current word doesn't fit: settle the existing full line
-                nlines += 1
-            lbuff, rest = "", width
-            if pl_w <= width:  # word is shorter than a line: start a new line with it
-                lbuff, rest = word + " ", width - pl_w - blen
-                continue
-            for ch in word:  # overly long word: break by characters
-                if font.text_length(lbuff, size) <= width - font.text_length(ch, size):
-                    lbuff += ch
-                else:
-                    nlines += 1
-                    lbuff = ch
-            lbuff += " "
-            rest = width - font.text_length(lbuff, size)
-        if lbuff:  # trailing content not yet settled
-            nlines += 1
-    return nlines
-
-
-def _fit_fontsize(text: str, rect: fitz.Rect, size: float, fontname: str) -> float | None:
-    """Find a font size that fits using insert_textbox's exact fitting formula:
-    required height = line_count * size * line_height_factor - descender*size
-    (line_height_factor = max(1.2, asc - desc)). Start from the original size
-    and shrink by 0.9x; if nothing fits, expand the rect height by one line and
-    retry; still nothing -> return None (overflow)."""
-    font = fitz.Font(fontname)
-    usable_w = rect.width - 2 * _RECT_PAD
-    lh_factor = max(1.2, font.ascender - font.descender)
-    floor = min(_MIN_FONT_SIZE, float(size))  # allow even smaller if the original size is already tiny
-    for extra in (0.0, float(size) * 1.5):    # second pass: height expanded by one line
-        avail_h = rect.height + extra
-        s = float(size)
-        while s >= floor:
-            nlines = _count_wrapped_lines(text, usable_w, s, font)
-            if nlines * s * lh_factor - font.descender * s <= avail_h:
-                return round(s, 2)
-            s *= 0.9
-    return None
-
-
-def _insert_fitted(page, rect: fitz.Rect, text: str, fontname: str,
-                   size: float, rgb: tuple) -> bool:
-    """Write the text; if it doesn't fit, shrink the font size and retry
-    (safety net for pre-check errors)."""
     floor = min(_MIN_FONT_SIZE, size)
-    s = float(size)
+    candidate = float(size)
     while True:
-        rc = page.insert_textbox(rect, text, fontname=fontname, fontsize=s, color=rgb)
-        if rc >= 0:
-            return True
-        s = round(s * 0.9, 2)
-        if s < floor:
-            return False
+        shape = page.new_shape()
+        if shape.insert_textbox(rect, text, fontname=fontname, fontsize=candidate, color=rgb) >= 0:
+            return candidate
+        if candidate <= floor:
+            return None
+        candidate = max(floor, round(candidate * 0.9, 2))
 
 
 def write_back(src_path: Path, dst_path: Path,
@@ -266,37 +215,35 @@ def write_back(src_path: Path, dst_path: Path,
         # (consistent algorithm => numbering matches the pipeline)
         segments, _rotated = _load_segments(src_path)
         numbered = {seg.seg_id: seg for seg in segments}
-        fontname = _pick_font(options.get("target_lang"))
-
         # Step 1: pre-check font-size fit before redaction; segments that
         # don't fit keep their original text and are neither redacted nor written.
-        jobs: dict[int, list[tuple[fitz.Rect, str, float, tuple]]] = {}
+        jobs: dict[int, list[tuple]] = {}
         for seg_id, translated in translations.items():
             seg = numbered.get(seg_id)
             if seg is None or not (translated or "").strip():
                 continue
             x0, y0, x1, y1 = seg.meta["bbox"]
             rect = fitz.Rect(x0 - _RECT_PAD, y0 - _RECT_PAD, x1 + _RECT_PAD, y1 + _RECT_PAD)
-            size = _fit_fontsize(translated, rect, float(seg.meta.get("size", 11.0)), fontname)
+            page = doc[seg.meta["page"] - 1]
+            fontname = _pick_font(options.get("target_lang"), translated)
+            rgb = _int_to_rgb(seg.meta.get("color"))
+            size = _prepare_fitted(page, rect, translated, fontname, float(seg.meta.get("size", 11.0)), rgb)
             if size is None:
                 report.overflow.append(seg_id)
                 continue
-            jobs.setdefault(seg.meta["page"], []).append(
-                (rect, translated, size, _int_to_rgb(seg.meta.get("color"))))
+            jobs.setdefault(seg.meta["page"], []).append((rect, translated, fontname, size, rgb))
 
-        # Step 2: redact all rects on each page in one pass (preserving
-        # background images and vector graphics), then write the translation.
+        # Redaction can rebuild font resources, so insert fresh shapes using
+        # the exact font/size that passed the real layout preflight.
         for pno in sorted(jobs):
             page = doc[pno - 1]
-            for rect, _text, _size, _rgb in jobs[pno]:
+            for rect, *_ in jobs[pno]:
                 page.add_redact_annot(rect)
             page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=0)
-            for rect, text, size, rgb in jobs[pno]:
-                if not _insert_fitted(page, rect, text, fontname, size, rgb):
-                    # The pre-check guarantees it fits, so this should not
-                    # happen; if it does, that segment's translation is missing.
-                    report.warnings.append(f"Page {pno}: one segment's translation write failed; the area was left blank")
-                    continue
+            for rect, text, fontname, size, rgb in jobs[pno]:
+                if page.insert_textbox(rect, text, fontname=fontname, fontsize=size, color=rgb) < 0:
+                    from .common import FormatAdapterError
+                    raise FormatAdapterError(f"Page {pno}: PDF text layout changed during export; the previous output has been kept")
                 report.written += 1
 
         doc.save(dst_path, deflate=True)

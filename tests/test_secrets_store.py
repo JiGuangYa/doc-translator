@@ -2,6 +2,11 @@
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def reset_secret_backend(monkeypatch):
+    monkeypatch.setattr("app.secrets_store._BACKEND", None)
+
+
 class _FakeKeyring:
     """In-memory keyring replacement.
 
@@ -103,3 +108,81 @@ def test_provider_api_key_not_in_plaintext(fake_keyring, tmp_path, monkeypatch):
     raw = (cfg / "providers.json").read_text()
     assert "sk-very-secret" not in raw, f"api key leaked into providers.json: {raw[:200]}"
     assert secrets_store.get_secret(pid) == "sk-very-secret"
+
+
+def test_failed_keyring_update_uses_latest_encrypted_key_after_restart(fake_keyring, tmp_path, monkeypatch):
+    from app import secrets_store as secrets
+    monkeypatch.setattr(secrets, '_data_dir', lambda: tmp_path)
+    secrets.set_secret('p', 'old-test-value')
+    def denied(*args):
+        raise RuntimeError('write denied')
+    monkeypatch.setattr(secrets.keyring, 'set_password', denied)
+    secrets.set_secret('p', 'new-test-value')
+    assert fake_keyring[(secrets.KEYRING_SERVICE, 'p')] == 'old-test-value'
+    assert secrets.get_secret('p') == 'new-test-value'
+    monkeypatch.setattr(secrets, '_BACKEND', None)
+    assert secrets.get_secret('p') == 'new-test-value'
+    assert b'new-test-value' not in (tmp_path / 'secrets/providers.json').read_bytes()
+
+
+def test_missing_keyring_item_falls_back_and_legacy_ciphertext_still_reads(fake_keyring, tmp_path, monkeypatch):
+    import json
+    from app import secrets_store as secrets
+    monkeypatch.setattr(secrets, '_data_dir', lambda: tmp_path)
+    secrets.set_secret('p', 'retained-test-value')
+    fake_keyring.clear()
+    assert secrets.get_secret('p') == 'retained-test-value'
+    path = tmp_path / 'secrets/providers.json'
+    entries = json.loads(path.read_text())
+    entries['p'] = entries['p']['ciphertext']  # The pre-0.1.3 file layout.
+    path.write_text(json.dumps(entries))
+    assert secrets.get_secret('p') == 'retained-test-value'
+
+
+def test_failed_encrypted_replace_preserves_previous_keys(tmp_path, monkeypatch):
+    from pathlib import Path
+    from app import secrets_store as secrets
+    monkeypatch.setattr(secrets, '_data_dir', lambda: tmp_path)
+    monkeypatch.setattr(secrets, 'keyring', _BoomKeyring())
+    secrets.set_secret('p', 'old-test-value')
+    secrets.set_secret('other', 'other-test-value')
+    before = (tmp_path / 'secrets/providers.json').read_bytes()
+    original_replace = Path.replace
+    def failed_replace(source, target):
+        if target.name == 'providers.json':
+            raise OSError('disk full')
+        return original_replace(source, target)
+    monkeypatch.setattr(Path, 'replace', failed_replace)
+    with pytest.raises(OSError, match='disk full'):
+        secrets.set_secret('p', 'new-test-value')
+    assert (tmp_path / 'secrets/providers.json').read_bytes() == before
+    assert secrets.get_secret('p') == 'old-test-value'
+    assert secrets.get_secret('other') == 'other-test-value'
+    assert not list((tmp_path / 'secrets').glob('tmp*'))
+
+
+def test_corrupt_secret_store_is_not_silently_replaced(fake_keyring, tmp_path, monkeypatch):
+    import json
+    from app import secrets_store as secrets
+    monkeypatch.setattr(secrets, '_data_dir', lambda: tmp_path)
+    secrets.set_secret('p', 'old-test-value')
+    path = tmp_path / 'secrets/providers.json'
+    path.write_bytes(b'corrupt original bytes')
+    with pytest.raises(json.JSONDecodeError):
+        secrets.set_secret('p', 'new-test-value')
+    assert path.read_bytes() == b'corrupt original bytes'
+    assert fake_keyring[(secrets.KEYRING_SERVICE, 'p')] == 'old-test-value'
+
+
+def test_failed_keyring_preference_update_keeps_committed_fallback(fake_keyring, tmp_path, monkeypatch):
+    from app import secrets_store as secrets
+    monkeypatch.setattr(secrets, '_data_dir', lambda: tmp_path)
+    original = secrets._write_secrets
+    def fail_preference(path, records):
+        if records['p']['keyring_current']:
+            raise OSError('disk full')
+        original(path, records)
+    monkeypatch.setattr(secrets, '_write_secrets', fail_preference)
+    secrets.set_secret('p', 'new-test-value')
+    monkeypatch.setattr(secrets, '_BACKEND', None)
+    assert secrets.get_secret('p') == 'new-test-value'

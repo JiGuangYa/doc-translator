@@ -5,7 +5,10 @@ try:
     _version = _pkg_version("doc-translator")
 except PackageNotFoundError:
     # Not installed as a package (dev mode): fall back to reading pyproject.toml directly.
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib
     from pathlib import Path
     _version = tomllib.loads(
         Path(__file__).resolve().parent.parent.joinpath("pyproject.toml").read_text(encoding="utf-8")

@@ -25,3 +25,5 @@ pytest==9.1.1
 
 # Synthetic verification fixtures only.
 reportlab==5.0.1
+
+tomli==2.2.1; python_version < "3.11"

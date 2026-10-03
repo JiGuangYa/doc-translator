@@ -10,8 +10,8 @@ import sys
 import tempfile
 
 
-APP_NAME = "DocTranslator.app"
-ZIP_NAME = "DocTranslator-macOS-arm64.zip"
+APP_NAME = "文档翻译预览版.app"
+ZIP_NAME = "DocTranslatorUnifiedPreview-0.3.0-macOS-arm64.zip"
 
 
 def running_commands() -> list[str]:

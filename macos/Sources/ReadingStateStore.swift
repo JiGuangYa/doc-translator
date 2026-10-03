@@ -2,14 +2,15 @@ import Foundation
 
 struct ReadingBookmark: Codable, Equatable {
     var mode = 0
-    var page = 1
+    var page = 0
     var zoom = 1.0
     var paragraphID: String?
+    var continuousPage: Int?
 
     var normalized: ReadingBookmark {
-        ReadingBookmark(mode: mode == 1 ? 1 : 0, page: max(1, page),
-                        zoom: zoom.isFinite ? min(2.5, max(0.5, zoom)) : 1,
-                        paragraphID: paragraphID)
+        ReadingBookmark(mode: (0...2).contains(mode) ? mode : 0, page: max(0, page),
+                        zoom: zoom.isFinite ? min(2.5, max(0.4, zoom)) : 1,
+                        paragraphID: paragraphID, continuousPage: continuousPage.map { max(1, $0) })
     }
 }
 
@@ -30,6 +31,10 @@ final class ReadingStateStore: ObservableObject {
 
     init(url: URL) {
         self.url = url
+        reload()
+    }
+
+    func reload() {
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         do {
             library = try JSONDecoder().decode(Library.self, from: Data(contentsOf: url))

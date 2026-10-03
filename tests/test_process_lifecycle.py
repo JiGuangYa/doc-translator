@@ -14,6 +14,8 @@ from app import config, store
 from app.services import process_runner, renderer
 
 
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="Desktop companion process tests require POSIX")
+
 def wait_until(predicate, timeout=4):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

@@ -37,7 +37,7 @@ final class ReadingStateTests: XCTestCase {
         XCTAssertEqual(copies.count, 1)
         XCTAssertEqual(try Data(contentsOf: copies[0]), corrupt)
         let restored = ReadingStateStore(url: url)
-        XCTAssertEqual(restored.bookmark(for: "a"), ReadingBookmark(mode: 0, page: 1, zoom: 2.5))
+        XCTAssertEqual(restored.bookmark(for: "a"), ReadingBookmark(mode: 0, page: 0, zoom: 2.5))
         XCTAssertNil(store.saveError)
     }
 

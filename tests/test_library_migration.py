@@ -1,6 +1,7 @@
 """Synthetic libraries only: never read Application Support or real credentials."""
 
 import hashlib
+import os
 import json
 
 import pytest
@@ -214,6 +215,7 @@ def test_bad_mapping_retains_output_and_blocks_write(tmp_path):
     )
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX library lease")
 def test_live_source_lock_rejected(tmp_path):
     import fcntl
 
@@ -222,3 +224,35 @@ def test_live_source_lock_rejected(tmp_path):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         with pytest.raises(ValueError, match="退出"):
             migration.import_library(str(support), "macbook", False)
+
+
+def test_same_machine_credentials_reencrypted_and_corrupt_credentials_reported(tmp_path):
+    from cryptography.fernet import Fernet
+    from app import secrets_store
+
+    support, root, _, before, _ = legacy(tmp_path, "native")
+    key = Fernet.generate_key()
+    secret_dir = root / "secrets"
+    secret_dir.mkdir()
+    (secret_dir / ".master").write_bytes(key)
+    write(
+        secret_dir / "providers.json",
+        {
+            "p_conflict": {
+                "ciphertext": Fernet(key).encrypt(b"synthetic-key").decode(),
+                "keyring_current": False,
+            }
+        },
+    )
+    report = migration.import_library(str(support), "native", False)
+    imported = store.load_job(report["task_map"][before["task_id"]])
+    assert secrets_store.get_secret(imported["provider_id"]) == "synthetic-key"
+    assert not report["credential_required"]
+    # Corrupt/cross-machine ciphertext must retain configuration and require re-entry.
+    provider_file = root / "config/providers.json"
+    providers = json.loads(provider_file.read_text())
+    providers["providers"][0]["model"] = "changed-model"
+    write(provider_file, providers)
+    (secret_dir / "providers.json").write_text("{damaged")
+    report = migration.import_library(str(support), "native", False)
+    assert len(report["credential_required"]) == 1

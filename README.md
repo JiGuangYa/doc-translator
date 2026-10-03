@@ -1,3 +1,5 @@
+> **0.3.0 原生统一预览分支**：面向 Apple Silicon、macOS 14+。独立安装“文档翻译预览版”，保留旧应用和旧资料库。使用与构建见 [macOS 预览版说明](macos/README.md)，兼容设计见 [架构说明](docs/UNIFIED_ARCHITECTURE.md)。
+
 # doc-translator
 
 ## macOS 原生版 · 0.1.8

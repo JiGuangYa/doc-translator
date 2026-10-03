@@ -13,12 +13,16 @@ import sys
 import urllib.request
 from pathlib import Path
 
+import pytest
+
 from docx import Document
 
 from app import config, store
 from app.services import pipeline
 from tests.test_process_lifecycle import running, wait_until
 
+
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="Desktop companion process tests require POSIX")
 
 def free_port():
     with socket.socket() as server:

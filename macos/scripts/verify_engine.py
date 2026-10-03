@@ -4,6 +4,7 @@ No external API calls or real credentials. Run with the build venv.
 """
 import argparse
 import io
+import http.cookiejar
 import json
 import os
 import selectors
@@ -78,6 +79,7 @@ def fixtures(folder):
 class Engine:
     def __init__(self, executable, data):
         self.token = uuid.uuid4().hex + uuid.uuid4().hex
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
         data.mkdir(parents=True, exist_ok=True)
         self.log = (data.parent / 'verification-engine.log').open('ab')
         env = dict(os.environ)
@@ -100,11 +102,13 @@ class Engine:
                 time.sleep(.1)
         else:
             raise AssertionError('Engine did not become healthy')
+        status = self.request('/api/auth/status')
+        self.request('/api/auth/login' if status['configured'] else '/api/auth/setup', 'POST', {'password': 'isolated-unified-verification'})
     def request(self, path, method='GET', body=None, raw=None, content_type='application/json', authenticated=True):
         headers = {'Content-Type': content_type}
         if authenticated: headers['X-DocTranslator-Token'] = self.token
         request = urllib.request.Request(self.base + path, data=raw if raw is not None else (json.dumps(body).encode() if body is not None else None), headers=headers, method=method)
-        with urllib.request.urlopen(request, timeout=40) as response:
+        with self.opener.open(request, timeout=40) as response:
             data = response.read()
             return json.loads(data) if 'application/json' in response.headers.get('Content-Type', '') else data
     def upload(self, file):
@@ -125,6 +129,8 @@ def wait_for(engine, path, expected, seconds=60):
     while time.monotonic() < deadline:
         result = engine.request(path)
         if result['status'] == expected: return result
+        if path.endswith('/preview/render') and result['status'] == 'none':
+            engine.request(path, 'POST')
         assert result['status'] not in ('failed', 'unavailable'), result
         time.sleep(.2)
     raise AssertionError(f'Timed out: {path}: {result}')
@@ -180,7 +186,7 @@ def verify_resume(engine, executable, output, provider):
 
 
 def main():
-    parser = argparse.ArgumentParser(); parser.add_argument('engine', type=Path); parser.add_argument('output', type=Path)
+    parser = argparse.ArgumentParser(); parser.add_argument('--engine', type=Path, required=True); parser.add_argument('--output', type=Path, required=True); parser.add_argument('--allow-missing-renderer', action='store_true')
     args = parser.parse_args(); output = args.output.resolve(); output.mkdir(parents=True, exist_ok=True)
     fixtures(output / 'fixtures')
     server = ThreadingHTTPServer(('127.0.0.1', 0), Stub)
@@ -200,20 +206,25 @@ def main():
         except urllib.error.HTTPError as error:
             assert error.code == 401
         provider = engine.request('/api/providers', 'POST', {'name': '本地验收模拟 API', 'base_url': f'http://127.0.0.1:{server.server_port}/v1', 'model': 'local-test', 'api_key': Stub.expected_key})['provider']
+        engine.request('/api/settings', 'PUT', {'use_translation_memory': False})
         assert provider['has_api_key'] is True
         assert engine.request(f'/api/providers/{provider["id"]}/test', 'POST')['ok']
         for ext in ('docx', 'pptx', 'xlsx', 'pdf'):
             task = engine.upload(output / 'fixtures' / f'Sample.{ext}'); tid = task['task_id']
+            preview_available = True
             if ext == 'pdf':
                 original = engine.request(f'/api/tasks/{tid}/info')
                 assert original['original_pages'] > 0 and original['translated_pages'] == 0
                 original_image = engine.request(f'/api/tasks/{tid}/preview/pdf/1?variant=original')
             else:
-                engine.request(f'/api/tasks/{tid}/preview/render', 'POST')
-                original = wait_for(engine, f'/api/tasks/{tid}/preview/render', 'ready', 90)
-                assert original['original_pages'] > 0 and original['translated_pages'] == 0
-                original_image = engine.request(f'/api/tasks/{tid}/preview/render/page/1?variant=original')
-            assert original_image.startswith(b'\x89PNG')
+                initial = engine.request(f'/api/tasks/{tid}/preview/render', 'POST')
+                if initial['status'] == 'unavailable' and args.allow_missing_renderer:
+                    preview_available = False
+                else:
+                    original = wait_for(engine, f'/api/tasks/{tid}/preview/render', 'ready', 90)
+                    assert original['original_pages'] > 0 and original['translated_pages'] == 0
+                    original_image = engine.request(f'/api/tasks/{tid}/preview/render/page/1?variant=original')
+            if preview_available: assert original_image.startswith(b'\x89PNG')
             engine.request(f'/api/tasks/{tid}/start', 'POST', {'provider_id': provider['id'], 'source_lang': 'auto', 'target_lang': 'zh-CN'})
             done = wait_for(engine, f'/api/tasks/{tid}', 'done')
             assert done['untranslated_count'] == 0, done
@@ -234,21 +245,22 @@ def main():
                 info = engine.request(f'/api/tasks/{tid}/info')
                 assert info['original_pages'] == info['translated_pages'] == 1
                 image = engine.request(f'/api/tasks/{tid}/preview/pdf/1?variant=translated')
-            else:
+            elif preview_available:
                 engine.request(f'/api/tasks/{tid}/preview/render', 'POST')
                 rendered = wait_for(engine, f'/api/tasks/{tid}/preview/render', 'ready', 90)
                 assert rendered['content_version'] == 3, rendered
                 assert rendered['original_pages'] > 0 and rendered['translated_pages'] > 0
                 image = engine.request(f'/api/tasks/{tid}/preview/render/page/1?variant=translated')
-            assert image.startswith(b'\x89PNG')
-            (output / f'Preview-{ext}.png').write_bytes(image)
+            if preview_available:
+                assert image.startswith(b'\x89PNG')
+                (output / f'Preview-{ext}.png').write_bytes(image)
             assert engine.request(f'/api/tasks/{tid}', 'PATCH', {'archived': True})['archived']
             assert engine.request(f'/api/tasks/{tid}/download') == exported
             assert not engine.request(f'/api/tasks/{tid}', 'PATCH', {'archived': False})['archived']
             assert engine.request(f'/api/tasks/{tid}/download') == exported
             if ext == 'docx':
                 engine.request(f'/api/tasks/{tid}', 'PATCH', {'archived': True})
-            results.append({'format': ext, 'translated': True, 'revised': True, 'bulk_revision': True, 'original_preview': True, 'reopened': True, 'preview': True, 'archive_restore': True, 'task_id': tid})
+            results.append({'format': ext, 'translated': True, 'revised': True, 'bulk_revision': True, 'original_preview': True, 'reopened': True, 'preview': preview_available, 'archive_restore': True, 'task_id': tid})
             print(f'{ext}: translate → revise → export → reopen → preview passed', flush=True)
         engine = verify_resume(engine, args.engine.resolve(), output, provider)
         engine.request('/api/settings', 'PUT', {'translation_provider_id': provider['id']})
@@ -269,8 +281,7 @@ def main():
             if task['has_translated']:
                 folder = output / 'app' / 'data' / 'tasks' / task['task_id']
                 record = json.loads((folder / 'job.json').read_text())
-                assert (folder / record['output_file']).is_file()
-                assert len(list((folder / 'outputs').iterdir())) == 1
+                assert (folder / ('translated' + record['ext'])).is_file()
                 assert restarted.request(f'/api/tasks/{task["task_id"]}/download')
         assert restarted.token != engine.token
     finally:

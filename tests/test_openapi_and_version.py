@@ -1,6 +1,9 @@
 """Test that OpenAPI and version endpoints are exposed and unauthenticated."""
 from pathlib import Path
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 
 def test_openapi_json_exposed(anon_client):

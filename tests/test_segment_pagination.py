@@ -72,3 +72,22 @@ def test_ocr_review_filter_covers_all_pages_and_excludes_confirmed(client, tmp_p
     response = client.get(f"/api/tasks/{task_id}/segments", params={"review_only": True, "offset": 1, "limit": 1}).json()
     assert response["total"] == 2
     assert response["segments"][0]["seg_id"] == "4"
+
+
+def test_draft_search_anchor_and_layout_filter_are_paginated(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, 'TASKS_DIR', tmp_path / 'tasks')
+    identifier = 'e' * 32
+    store.save_job(identifier, {'task_id': identifier, 'ext': '.docx', 'filename': 'Long.docx',
+        'segments': [{'seg_id': f's{i:06d}', 'text': f'Paragraph {i}', 'translatable': True} for i in range(10000)],
+        'translations': {}, 'revision': 3, 'overflow': ['s008123']})
+    store._atomic_write_json(config.DATA_DIR / 'revision-drafts.json', {'schema_version': 2, 'tasks': {
+        identifier: {'revision': 3, 'segments': {'s009999': 'Draft-only keyword', 's000001': ''}}}})
+    route = f'/api/tasks/{identifier}/segments'
+    response = client.get(route, params={'q': 'draft-only', 'limit': 100}).json()
+    assert response['total'] == 1 and response['segments'][0]['seg_id'] == 's009999'
+    response = client.get(route, params={'filter': 'drafts', 'limit': 100}).json()
+    assert response['total'] == 2
+    response = client.get(route, params={'anchor_id': 's008123', 'limit': 100}).json()
+    assert response['offset'] == 8100 and len(response['segments']) == 100
+    response = client.get(route, params={'filter': 'layout', 'limit': 100}).json()
+    assert [s['seg_id'] for s in response['segments']] == ['s008123']

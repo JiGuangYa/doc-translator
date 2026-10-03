@@ -19,10 +19,14 @@ if [[ -z "${DEVELOPER_DIR:-}" ]]; then
     fi
   done
 fi
-swift build --package-path "$ROOT/macos" -c release
-BIN_DIR="$(swift build --package-path "$ROOT/macos" -c release --show-bin-path)"
+"$ROOT/macos/scripts/swift_tool.sh" build --package-path "$ROOT/macos" -c release
+BIN_DIR="$("$ROOT/macos/scripts/swift_tool.sh" build --package-path "$ROOT/macos" -c release --show-bin-path)"
 
-.venv/bin/pyinstaller --noconfirm --clean --onedir --name DocTranslatorEngine \
+ICON_DEV="$DEVELOPER_DIR"
+if ! /usr/bin/xcrun --sdk macosx --show-sdk-path >/dev/null 2>&1; then
+  export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+fi
+.venv/bin/python -m PyInstaller --noconfirm --clean --onedir --name DocTranslatorEngine \
   --paths "$ROOT" \
   --add-data "$ROOT/app/i18n:app/i18n" \
   --add-data "$ROOT/static:static" \
@@ -41,7 +45,7 @@ BIN_DIR="$(swift build --package-path "$ROOT/macos" -c release --show-bin-path)"
 
 APP_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/doc-translator-build.XXXXXX")"
 trap 'rm -rf "$APP_STAGE"' EXIT
-APP="$APP_STAGE/DocTranslator.app"
+APP="$APP_STAGE/文档翻译预览版.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/DocTranslatorMac" "$APP/Contents/MacOS/DocTranslatorMac"
 ditto "$DIST_DIR/DocTranslatorEngine" "$APP/Contents/Resources/DocTranslatorEngine"
@@ -51,13 +55,13 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <plist version="1.0"><dict>
   <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
   <key>CFBundleExecutable</key><string>DocTranslatorMac</string>
-  <key>CFBundleIdentifier</key><string>com.codex.doctranslatormac</string>
+  <key>CFBundleIdentifier</key><string>com.jiguang.doctranslator.preview</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>CFBundleName</key><string>文档翻译</string>
+  <key>CFBundleName</key><string>文档翻译预览版</string>
   <key>CFBundleIconFile</key><string>DocTranslator</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.8</string>
-  <key>CFBundleVersion</key><string>10</string>
+  <key>CFBundleShortVersionString</key><string>0.3.0</string>
+  <key>CFBundleVersion</key><string>30</string>
   <key>CFBundleDocumentTypes</key><array><dict>
     <key>CFBundleTypeName</key><string>可翻译文档</string>
     <key>CFBundleTypeRole</key><string>Viewer</string>
@@ -74,7 +78,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict></plist>
 PLIST
 
-swift "$ROOT/macos/scripts/make_icon.swift" "$APP_STAGE/DocTranslator.iconset"
+"$ICON_DEV/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift" -sdk "$ICON_DEV/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" "$ROOT/macos/scripts/make_icon.swift" "$APP_STAGE/DocTranslator.iconset"
 iconutil -c icns "$APP_STAGE/DocTranslator.iconset" -o "$APP/Contents/Resources/DocTranslator.icns"
 cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE-doc-translator.txt"
 .venv/bin/python "$ROOT/macos/collect_licenses.py" "$APP/Contents/Resources/ThirdPartyNotices.txt"
@@ -82,4 +86,4 @@ xattr -cr "$APP"
 codesign --force --deep --sign - "$APP"
 codesign --verify --deep --strict "$APP"
 .venv/bin/python "$ROOT/macos/scripts/bundle_output.py" publish "$APP" "$DIST_DIR"
-echo "Built $ROOT/macos/dist/DocTranslator.app"
+echo "Built $ROOT/macos/dist/文档翻译预览版.app"

@@ -16,30 +16,40 @@ struct OCRLine: Sendable {
 
 enum OCRService {
     static func recognize(_ file: URL, pages: [Int]? = nil) throws -> [OCRLine] {
-        guard let pageCount = autoreleasepool(invoking: { PDFDocument(url: file)?.pageCount }) else {
+        guard let document = CGPDFDocument(file as CFURL) else {
             throw AppFailure.message("无法读取扫描版 PDF")
         }
         var lines: [OCRLine] = []
-        let requested = pages ?? Array(1...max(1, pageCount))
+        let requested = pages ?? Array(1...max(1, document.numberOfPages))
         for number in requested {
             try Task.checkCancellation()
-            guard number >= 1, number <= pageCount else {
+            guard number >= 1, number <= document.numberOfPages else {
                 throw AppFailure.message("扫描页码超出文档范围")
             }
             let pageLines: [OCRLine] = try autoreleasepool {
-                // PDFKit caches thumbnails on the document. Scope that cache to
-                // one page so long scans do not retain every rendered bitmap.
-                guard let document = PDFDocument(url: file), let page = document.page(at: number - 1) else {
+                guard let page = document.page(at: number) else {
                     throw AppFailure.message("无法读取第 \(number) 页")
                 }
-                let bounds = page.bounds(for: .cropBox)
-                let rotated = abs(page.rotation) % 180 == 90
+                let bounds = page.getBoxRect(.cropBox)
+                let rotated = abs(page.rotationAngle) % 180 == 90
                 let width = rotated ? bounds.height : bounds.width
                 let height = rotated ? bounds.width : bounds.height
                 let scale = min(2.5, 2400 / max(width, height))
-                let thumbnail = page.thumbnail(of: NSSize(width: width * scale, height: height * scale), for: .cropBox)
-                var imageRect = NSRect.zero
-                guard let image = thumbnail.cgImage(forProposedRect: &imageRect, context: nil, hints: nil) else {
+                let pixelsWide = max(1, Int((width * scale).rounded()))
+                let pixelsHigh = max(1, Int((height * scale).rounded()))
+                // A fresh bitmap avoids PDFKit's retained thumbnail caches.
+                guard let context = CGContext(data: nil, width: pixelsWide, height: pixelsHigh,
+                    bitsPerComponent: 8, bytesPerRow: pixelsWide * 4, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else {
+                    throw AppFailure.message("无法分配第 \(number) 页的识别图像")
+                }
+                let rect = CGRect(x: 0, y: 0, width: pixelsWide, height: pixelsHigh)
+                context.setFillColor(CGColor(gray: 1, alpha: 1)); context.fill(rect)
+                context.scaleBy(x: CGFloat(pixelsWide) / width, y: CGFloat(pixelsHigh) / height)
+                context.concatenate(page.getDrawingTransform(.cropBox,
+                    rect: CGRect(x: 0, y: 0, width: width, height: height), rotate: 0, preserveAspectRatio: true))
+                context.drawPDFPage(page)
+                guard let image = context.makeImage() else {
                     throw AppFailure.message("无法生成第 \(number) 页的识别图像")
                 }
                 let request = VNRecognizeTextRequest()

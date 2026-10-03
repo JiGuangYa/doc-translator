@@ -111,11 +111,13 @@ final class BackendServer {
 
         let health = baseURL.appendingPathComponent("healthz")
         let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [:]
         configuration.timeoutIntervalForRequest = 0.5
         configuration.timeoutIntervalForResource = 0.5
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
         let deadline = ProcessInfo.processInfo.systemUptime + startupTimeout
+        var healthFailure = "尚未收到本机响应"
         do {
             while ProcessInfo.processInfo.systemUptime < deadline {
                 try Task.checkCancellation()
@@ -132,13 +134,15 @@ final class BackendServer {
                 var request = URLRequest(url: health)
                 request.timeoutInterval = 0.5
                 if !authToken.isEmpty { request.setValue(authToken, forHTTPHeaderField: "X-DocTranslator-Token") }
-                if let (_, response) = try? await session.data(for: request),
-                   (response as? HTTPURLResponse)?.statusCode == 200 {
-                    return baseURL
-                }
+                do {
+                    let (_, response) = try await session.data(for: request)
+                    let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    if status == 200 { return baseURL }
+                    healthFailure = "HTTP \(status)"
+                } catch { healthFailure = error.localizedDescription }
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
-            throw AppFailure.message("翻译引擎启动超时，可重试。日志：\(logURL.path)")
+            throw AppFailure.message("翻译引擎启动超时，可重试。\(healthFailure) 日志：\(logURL.path)")
         } catch {
             if child.isRunning { child.terminate() }
             await waitForExit(child, timeout: min(1, shutdownTimeout))
@@ -212,6 +216,7 @@ final class APIClient {
         self.baseURL = baseURL
         let config = configuration ?? URLSessionConfiguration.ephemeral
         config.urlCache = nil
+        config.connectionProxyDictionary = [:] // Companion traffic must stay on loopback.
         if !token.isEmpty { config.httpAdditionalHeaders = ["X-DocTranslator-Token": token] }
         config.httpCookieAcceptPolicy = .always
         session = URLSession(configuration: config)

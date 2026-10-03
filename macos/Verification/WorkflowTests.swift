@@ -277,10 +277,12 @@ struct NativeWorkflowTests {
         let python = URL(fileURLWithPath: ProcessInfo.processInfo.environment["NATIVE_TEST_PYTHON"] ?? "/usr/bin/python3")
         let server = #"""
 import os, signal
+print("Isolated lifecycle fixture started", flush=True)
 from http.server import HTTPServer, BaseHTTPRequestHandler
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        print("Lifecycle fixture received health request", flush=True)
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b'OK')

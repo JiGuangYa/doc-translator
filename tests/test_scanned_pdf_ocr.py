@@ -49,7 +49,9 @@ def test_scanned_pdf_ocr_review_and_export(client, tmp_path, monkeypatch):
     started = client.post(f"/api/tasks/{task_id}/start", json={
         "provider_id": "mock", "source_lang": "en", "target_lang": "zh-CN"})
     assert started.status_code == 200
-    for _ in range(50):
+    # Cold font initialization on Windows runners can exceed 2.5 seconds.
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
         job = store.load_job(task_id)
         if job["status"] in {"done", "failed"}:
             break

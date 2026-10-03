@@ -116,8 +116,8 @@ final class BackendServer {
         let health = baseURL.appendingPathComponent("healthz")
         let configuration = URLSessionConfiguration.ephemeral
         configuration.connectionProxyDictionary = [:]
-        configuration.timeoutIntervalForRequest = 0.5
-        configuration.timeoutIntervalForResource = 0.5
+        configuration.timeoutIntervalForRequest = min(5, startupTimeout)
+        configuration.timeoutIntervalForResource = min(5, startupTimeout)
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
         let deadline = ProcessInfo.processInfo.systemUptime + startupTimeout
@@ -136,7 +136,7 @@ final class BackendServer {
                     throw AppFailure.message("翻译引擎启动失败。日志：\(logURL.path)")
                 }
                 var request = URLRequest(url: health)
-                request.timeoutInterval = 0.5
+                request.timeoutInterval = min(5, startupTimeout)
                 if !authToken.isEmpty { request.setValue(authToken, forHTTPHeaderField: "X-DocTranslator-Token") }
                 do {
                     let (_, response) = try await session.data(for: request)

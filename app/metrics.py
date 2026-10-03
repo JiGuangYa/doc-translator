@@ -66,7 +66,7 @@ tasks_total = Counter(
 # ---------- App lifecycle ----------
 
 process_start_time_seconds = Gauge(
-    "process_start_time_seconds",
+    "doc_translator_process_start_time_seconds",
     "Unix timestamp of process start (set once at module import).",
 )
 process_start_time_seconds.set(__import__("time").time())

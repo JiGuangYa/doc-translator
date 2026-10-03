@@ -288,8 +288,12 @@ class Handler(BaseHTTPRequestHandler):
 HTTPServer(('127.0.0.1', int(os.environ['DOC_TRANSLATOR_PORT'])), Handler).serve_forever()
 """#
         let ready = try BackendServer(dataDirectory: directory.appendingPathComponent("ready"),
-            executable: python, arguments: ["-c", server], startupTimeout: 3, shutdownTimeout: 0.3)
-        _ = try await ready.start()
+            executable: python, arguments: ["-c", server], startupTimeout: 15, shutdownTimeout: 0.3)
+        do { _ = try await ready.start() }
+        catch {
+            let log = (try? String(contentsOf: directory.appendingPathComponent("ready/backend.log"))) ?? "No startup log"
+            throw AppFailure.message("\(error.localizedDescription)\n\(log)")
+        }
         precondition(ready.isRunning)
         let stopping = ProcessInfo.processInfo.systemUptime
         await ready.stopAndWait()

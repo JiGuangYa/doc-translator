@@ -613,7 +613,7 @@ def _apply_translations(task_id: str, ext: str, translations: dict[str, str]) ->
         else:
             report = handler.write_back(src, pending, clean, options)
         _validate_output(pending, ext, src)
-        with pending.open("rb") as handle:
+        with pending.open("r+b") as handle:
             os.fsync(handle.fileno())
         if output_transaction.file_hash(dst) != previous_hash:
             versions = tdir / "versions"

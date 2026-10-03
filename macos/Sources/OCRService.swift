@@ -16,18 +16,20 @@ struct OCRLine: Sendable {
 
 enum OCRService {
     static func recognize(_ file: URL, pages: [Int]? = nil) throws -> [OCRLine] {
-        guard let document = PDFDocument(url: file) else {
+        guard let pageCount = autoreleasepool(invoking: { PDFDocument(url: file)?.pageCount }) else {
             throw AppFailure.message("无法读取扫描版 PDF")
         }
         var lines: [OCRLine] = []
-        let requested = pages ?? Array(1...max(1, document.pageCount))
+        let requested = pages ?? Array(1...max(1, pageCount))
         for number in requested {
             try Task.checkCancellation()
-            guard number >= 1, number <= document.pageCount else {
+            guard number >= 1, number <= pageCount else {
                 throw AppFailure.message("扫描页码超出文档范围")
             }
             let pageLines: [OCRLine] = try autoreleasepool {
-                guard let page = document.page(at: number - 1) else {
+                // PDFKit caches thumbnails on the document. Scope that cache to
+                // one page so long scans do not retain every rendered bitmap.
+                guard let document = PDFDocument(url: file), let page = document.page(at: number - 1) else {
                     throw AppFailure.message("无法读取第 \(number) 页")
                 }
                 let bounds = page.bounds(for: .cropBox)

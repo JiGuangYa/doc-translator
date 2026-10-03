@@ -20,7 +20,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='unified-long-pdf-') as temporary:
         root = Path(temporary)
         source = long_scan_pdf(root / 'Long128.pdf', pages=128)
-        run = subprocess.run(['/usr/bin/time', '-l', args.ocr_tool, '--ocr-json', str(source)],
+        run = subprocess.run(['/usr/bin/time', '-l', args.ocr_tool, '--ocr-json-paged', str(source)],
                              capture_output=True, text=True, timeout=300, check=True)
         lines = json.loads(run.stdout)
         assert set(line['page'] for line in lines) == set(range(1, 129))

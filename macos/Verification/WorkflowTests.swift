@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import Vision
+import PDFKit
 
 // Exercises the real API client and AppState with an isolated in-memory backend.
 // No saved credentials, notification permissions or UI automation are involved.
@@ -91,10 +92,22 @@ final class StubBackend: URLProtocol {
 @main
 struct NativeWorkflowTests {
     @MainActor static func main() async throws {
-        if CommandLine.arguments.dropFirst().first == "--ocr-json" {
+        if ["--ocr-json", "--ocr-json-paged"].contains(CommandLine.arguments.dropFirst().first ?? "") {
             let source = URL(fileURLWithPath: CommandLine.arguments[2])
             let pages = CommandLine.arguments.dropFirst(3).compactMap(Int.init)
-            let lines = try await Task.detached { try OCRService.recognize(source, pages: pages.isEmpty ? nil : pages) }.value
+            let lines: [OCRLine]
+            if CommandLine.arguments[1] == "--ocr-json-paged" {
+                let count = PDFDocument(url: source)?.pageCount ?? 0
+                guard count > 0 else { throw AppFailure.message("Invalid OCR fixture") }
+                var output: [OCRLine] = []
+                // Match AppState's durable, sequential page loop.
+                for page in (pages.isEmpty ? Array(1...count) : pages) {
+                    output += try await Task.detached { try OCRService.recognize(source, pages: [page]) }.value
+                }
+                lines = output
+            } else {
+                lines = try await Task.detached { try OCRService.recognize(source, pages: pages.isEmpty ? nil : pages) }.value
+            }
             let data = try JSONSerialization.data(withJSONObject: lines.map(\.json))
             print(String(decoding: data, as: UTF8.self))
             return
@@ -278,7 +291,8 @@ struct NativeWorkflowTests {
         let server = #"""
 import os, signal
 print("Isolated lifecycle fixture started", flush=True)
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler
+from socketserver import TCPServer
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -287,7 +301,10 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'OK')
     def log_message(self, *args): pass
-HTTPServer(('127.0.0.1', int(os.environ['DOC_TRANSLATOR_PORT'])), Handler).serve_forever()
+# TCPServer avoids HTTPServer.server_bind's reverse-DNS lookup on hosted Macs.
+server = TCPServer(('127.0.0.1', int(os.environ['DOC_TRANSLATOR_PORT'])), Handler)
+print("Isolated lifecycle fixture bound", flush=True)
+server.serve_forever()
 """#
         let ready = try BackendServer(dataDirectory: directory.appendingPathComponent("ready"),
             executable: python, arguments: ["-c", server], startupTimeout: 15, shutdownTimeout: 0.3)

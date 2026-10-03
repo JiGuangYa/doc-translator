@@ -272,7 +272,8 @@ final class NativeWorkflowTests: XCTestCase {
         let server = #"""
 import os, signal
 print("Isolated lifecycle fixture started", flush=True)
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler
+from socketserver import TCPServer
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -281,7 +282,10 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'OK')
     def log_message(self, *args): pass
-HTTPServer(('127.0.0.1', int(os.environ['DOC_TRANSLATOR_PORT'])), Handler).serve_forever()
+# TCPServer avoids HTTPServer.server_bind's reverse-DNS lookup on hosted Macs.
+server = TCPServer(('127.0.0.1', int(os.environ['DOC_TRANSLATOR_PORT'])), Handler)
+print("Isolated lifecycle fixture bound", flush=True)
+server.serve_forever()
 """#
         let ready = try BackendServer(dataDirectory: directory.appendingPathComponent("ready"),
             executable: python, arguments: ["-c", server], startupTimeout: 15, shutdownTimeout: 0.3)

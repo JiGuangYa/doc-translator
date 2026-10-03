@@ -15,6 +15,7 @@ import urllib.error
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 from pathlib import Path
 
 import fitz
@@ -22,6 +23,13 @@ from docx import Document
 from pptx import Presentation
 from pptx.util import Inches
 import openpyxl
+
+
+class LocalHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        TCPServer.server_bind(self)
+        self.server_name = 'localhost'
+        self.server_port = self.server_address[1]
 
 
 class Stub(BaseHTTPRequestHandler):
@@ -189,7 +197,7 @@ def main():
     parser = argparse.ArgumentParser(); parser.add_argument('--engine', type=Path, required=True); parser.add_argument('--output', type=Path, required=True); parser.add_argument('--allow-missing-renderer', action='store_true')
     args = parser.parse_args(); output = args.output.resolve(); output.mkdir(parents=True, exist_ok=True)
     fixtures(output / 'fixtures')
-    server = ThreadingHTTPServer(('127.0.0.1', 0), Stub)
+    server = LocalHTTPServer(('127.0.0.1', 0), Stub)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     engine = Engine(args.engine.resolve(), output / 'app' / 'data')
     results = []

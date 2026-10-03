@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import threading
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -290,11 +291,23 @@ def import_library(source: str, kind: str = "auto", allow_keychain: bool = True,
             from contextlib import closing
             from . import memory
             try:
-                with closing(sqlite3.connect(_source_file(root, old_memory).as_uri() + "?mode=ro", uri=True)) as before, closing(memory._connect()) as after, after:
-                    for row in before.execute("SELECT source_lang,target_lang,source_text,provider_id,translation,verified,updated_at FROM translations"):
-                        values = list(row)
-                        values[3] = provider_map.get(values[3], "legacy:" + identity + ":" + values[3])
-                        after.execute("INSERT OR IGNORE INTO translations VALUES (?,?,?,?,?,?,?)", values)
+                # Even SQLite mode=ro may create WAL/SHM beside the source.
+                # Read a checked copy, including committed WAL records.
+                with tempfile.TemporaryDirectory(prefix="memory-import-", dir=config.DATA_DIR) as temporary:
+                    copied = Path(temporary) / old_memory.name
+                    for suffix in ("", "-wal", "-shm"):
+                        source_file = _source_file(root, Path(str(old_memory) + suffix))
+                        if source_file.exists():
+                            digest = output_transaction.file_hash(source_file)
+                            destination_file = Path(str(copied) + suffix)
+                            shutil.copy2(source_file, destination_file)
+                            if digest != output_transaction.file_hash(destination_file) or digest != output_transaction.file_hash(source_file):
+                                raise ValueError("翻译记忆在导入时发生变化，请退出来源应用后重试")
+                    with closing(sqlite3.connect(copied.as_uri() + "?mode=ro", uri=True)) as before, closing(memory._connect()) as after, after:
+                        for row in before.execute("SELECT source_lang,target_lang,source_text,provider_id,translation,verified,updated_at FROM translations"):
+                            values = list(row)
+                            values[3] = provider_map.get(values[3], "legacy:" + identity + ":" + values[3])
+                            after.execute("INSERT OR IGNORE INTO translations VALUES (?,?,?,?,?,?,?)", values)
             except (OSError, sqlite3.Error) as error:
                 report["issues"].append({"task_id": "", "message": "翻译记忆导入失败：" + str(error)})
         report["report_id"] = uuid.uuid4().hex

@@ -256,3 +256,21 @@ def test_same_machine_credentials_reencrypted_and_corrupt_credentials_reported(t
     (secret_dir / "providers.json").write_text("{damaged")
     report = migration.import_library(str(support), "native", False)
     assert len(report["credential_required"]) == 1
+
+
+def test_memory_import_never_creates_source_wal_sidecars(tmp_path):
+    import sqlite3
+    from contextlib import closing
+
+    support, root, _, _, _ = legacy(tmp_path, "native")
+    with closing(sqlite3.connect(root / "translation_memory.sqlite3")) as database, database:
+        database.execute("PRAGMA journal_mode=WAL")
+        database.execute(
+            "CREATE TABLE translations (source_lang TEXT, target_lang TEXT, source_text TEXT, provider_id TEXT, translation TEXT, verified INTEGER, updated_at REAL)"
+        )
+        database.execute(
+            "INSERT INTO translations VALUES ('en','zh-CN','fixture','p_conflict','memory',1,0)"
+        )
+    before = hashes(support)
+    migration.import_library(str(support), "native", False)
+    assert hashes(support) == before

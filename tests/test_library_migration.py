@@ -286,3 +286,26 @@ def test_embedded_legacy_translations_keep_resume_confirmation_and_unknown_usage
     assert imported["translations"]["s000000"] == "Translated text"
     assert imported["requires_snapshot_confirmation"]
     assert imported["history_usage_unknown"]
+
+
+def test_complex_macbook_legacy_preserves_existing_bytes_and_blocks_lossy_rebuild(tmp_path):
+    from tests.docx_fixtures import complex_docx
+
+    support, _, folder, job, output = legacy(tmp_path, "macbook", version=3)
+    original = complex_docx(folder / "original.docx", compatibility_copy=True)
+    extracted = common.get_format_handler(".docx").extract(original, {"docx_version": 3})
+    job["segments"] = [
+        {"seg_id": common.make_seg_id(i), "text": part.text, "translatable": True}
+        for i, part in enumerate(extracted.segments)
+    ]
+    write(folder / "job.json", job)
+    before = output.read_bytes()
+    result = migration.import_library(str(support), "macbook", False)
+    identifier = result["task_map"][job["task_id"]]
+    copied = store.load_job(identifier)
+    assert copied["format_options"]["docx_version"] == 3
+    assert "链接或混合样式" in copied["migration_issue"]
+    assert store.document_path(copied, "translated").read_bytes() == before
+    with pytest.raises(ValueError):
+        pipeline.revise_segments(identifier, {"s000000": "Unsafe old writer"})
+    assert store.document_path(copied, "translated").read_bytes() == before

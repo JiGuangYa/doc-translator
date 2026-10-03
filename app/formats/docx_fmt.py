@@ -143,6 +143,10 @@ def extract(path: Path, options: dict) -> ExtractResult:
 
 
 def validate_writeback(path: Path, options: dict):
+    if options.get("docx_version") == 3:
+        from . import docx_macbook
+        docx_macbook.validate_writeback(path, options)
+        return
     if options.get("docx_version", 1) not in (1, 2, 3):
         raise FormatAdapterError("This Word task requires a newer app version")
     if options.get("docx_version", 1) == 2 and not options.get("no_translation"):

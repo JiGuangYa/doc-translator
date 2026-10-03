@@ -117,6 +117,8 @@ def _verify_mapping(job, source, kind):
         actual = {common.make_seg_id(i): s.text for i, s in enumerate(extracted.segments)}
         if actual == expected:
             job["format_options"] = candidate
+            if job["ext"] == ".docx" and candidate.get("docx_version") == 3:
+                handler.validate_writeback(source, candidate)
             return
     raise ValueError("原件与旧段落编号无法一一对应；已保留译文、草稿和原件，请另译一份或检查旧数据")
 

@@ -23,7 +23,7 @@ The first start stores provider metadata and prices, translation settings, langu
 
 A durable manifest assigns new task/model IDs before copying. Each source job, original and current output is fingerprinted, then the staged copy is verified before publication. Existing translated bytes are copied without conversion. The manifest makes interrupted imports retryable, identical imports deduplicate, and changed source content becomes another copy. Source libraries are read only and must be stopped.
 
-Word compatibility modes remain explicit: native legacy v1, structured v2, MacBook legacy v3. PPT note handling is recovered by comparing extracted IDs/text with stored segments. Failed mapping preserves files but blocks translation/revision; “另译一份” uses the current parser. Old writers retain their historical limitations. Preview caches are regenerated.
+Word compatibility modes remain explicit: native legacy v1, structured v2, MacBook legacy v3. PPT note handling is recovered by comparing extracted IDs/text with stored segments. Failed mapping preserves files but blocks translation/revision; “另译一份” uses the current parser. Legacy MacBook Word documents with links, mixed styles or compound text runs block rebuilding; their copied output remains exportable, and a separate translation uses the structured writer. Preview caches are regenerated.
 
 ## Verification
 

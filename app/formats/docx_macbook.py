@@ -121,10 +121,29 @@ def extract(path: Path, options: dict) -> ExtractResult:
     return ExtractResult(segments=segments, skipped_count=skipped, warnings=warnings)
 
 
+def validate_writeback(path: Path, options: dict):
+    """Retain old IDs without silently repeating the old destructive run collapse."""
+    from docx import Document
+    from lxml import etree
+    from .common import FormatAdapterError
+
+    for paragraph, _ in _ordered_items(Document(str(path))):
+        if _should_skip(paragraph) or not _para_text(paragraph).strip():
+            continue
+        runs = paragraph.xpath(_RUN_XPATH)
+        styles = {etree.tostring(run.xpath('./w:rPr')[0], method='c14n')
+                  if run.xpath('./w:rPr') else b'' for run in runs}
+        if paragraph.xpath('.//w:hyperlink') or any(len(run.xpath('./w:t')) > 1 for run in runs) or len(styles) > 1:
+            raise FormatAdapterError(
+                "旧 MacBook Word 编号对应的段落包含链接或混合样式，旧写回方式无法保证保真。"
+                "已保留当前译文，可继续导出；请使用“另译一份”进行结构化翻译和修订。")
+
+
 def write_back(src_path: Path, dst_path: Path, translations: dict[str, str],
                options: dict) -> WriteReport:
     from docx import Document
 
+    validate_writeback(src_path, options)
     shutil.copy2(src_path, dst_path)
     doc = Document(str(dst_path))
     report = WriteReport()

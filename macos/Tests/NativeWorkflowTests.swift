@@ -187,7 +187,9 @@ final class NativeWorkflowTests: XCTestCase {
 
         await Self.testSegmentPaging(api: api)
 
+        print("Starting native lifecycle gates"); fflush(stdout)
         try await Self.testBackendLifecycle(directory: directory)
+        print("Starting native Vision gates"); fflush(stdout)
         try await Self.testLocalOCR()
     }
 

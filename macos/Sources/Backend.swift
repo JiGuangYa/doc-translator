@@ -175,11 +175,24 @@ final class BackendServer {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
                 let deadline = ProcessInfo.processInfo.systemUptime + timeout
-                while process.isRunning && ProcessInfo.processInfo.systemUptime < deadline {
+                let pid = process.processIdentifier
+                var status: Int32 = 0
+                func exited() -> Bool {
+                    let result = waitpid(pid, &status, WNOHANG)
+                    return result == pid || (result < 0 && errno == ECHILD)
+                }
+                while !exited() && ProcessInfo.processInfo.systemUptime < deadline {
                     Thread.sleep(forTimeInterval: 0.05)
                 }
-                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-                process.waitUntilExit()
+                if !exited() {
+                    kill(pid, SIGKILL)
+                    // Do not depend on Foundation's termination callback run loop.
+                    // Headless macOS test hosts may not pump that run loop.
+                    let reapDeadline = ProcessInfo.processInfo.systemUptime + 1
+                    while !exited() && ProcessInfo.processInfo.systemUptime < reapDeadline {
+                        Thread.sleep(forTimeInterval: 0.01)
+                    }
+                }
                 continuation.resume()
             }
         }

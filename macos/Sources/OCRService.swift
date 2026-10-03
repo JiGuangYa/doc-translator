@@ -15,7 +15,20 @@ struct OCRLine: Sendable {
 }
 
 enum OCRService {
+    private static let recognitionLock = NSLock()
+    private static let recognitionRequest: VNRecognizeTextRequest = {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+        request.automaticallyDetectsLanguage = true
+        return request
+    }()
+
     static func recognize(_ file: URL, pages: [Int]? = nil) throws -> [OCRLine] {
+        try Task.checkCancellation()
+        recognitionLock.lock()
+        defer { recognitionLock.unlock() }
+        let request = recognitionRequest
         guard let document = CGPDFDocument(file as CFURL) else {
             throw AppFailure.message("无法读取扫描版 PDF")
         }
@@ -52,10 +65,6 @@ enum OCRService {
                 guard let image = context.makeImage() else {
                     throw AppFailure.message("无法生成第 \(number) 页的识别图像")
                 }
-                let request = VNRecognizeTextRequest()
-                request.recognitionLevel = .accurate
-                request.usesLanguageCorrection = true
-                request.automaticallyDetectsLanguage = true
                 try VNImageRequestHandler(cgImage: image).perform([request])
                 try Task.checkCancellation()
                 return (request.results ?? []).compactMap { result in

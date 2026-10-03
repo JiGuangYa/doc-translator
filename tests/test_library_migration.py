@@ -274,3 +274,15 @@ def test_memory_import_never_creates_source_wal_sidecars(tmp_path):
     before = hashes(support)
     migration.import_library(str(support), "native", False)
     assert hashes(support) == before
+
+
+def test_embedded_legacy_translations_keep_resume_confirmation_and_unknown_usage(tmp_path):
+    support, _, folder, job, _ = legacy(tmp_path, "native", status="paused")
+    job["segments"][0]["translation"] = job["translations"].pop("s000000")
+    job["usage"] = None
+    write(folder / "job.json", job)
+    report = migration.import_library(str(support), "native", False)
+    imported = store.load_job(report["task_map"][job["task_id"]])
+    assert imported["translations"]["s000000"] == "Translated text"
+    assert imported["requires_snapshot_confirmation"]
+    assert imported["history_usage_unknown"]

@@ -98,6 +98,10 @@ final class BackendServer {
         environment["DOC_TRANSLATOR_DESKTOP"] = "1"
         environment["DOC_TRANSLATOR_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
         environment["DOC_TRANSLATOR_KEYRING_SERVICE"] = (Bundle.main.bundleIdentifier ?? "com.jiguang.doctranslator.preview") + ".providers"
+        // A test/debug host's injected libraries must not enter the companion.
+        for key in Array(environment.keys) where key.hasPrefix("DYLD_") || key.hasPrefix("XCTest") || key.hasPrefix("XCInject") {
+            environment.removeValue(forKey: key)
+        }
         environment.removeValue(forKey: "PYTHONHOME")
         environment.removeValue(forKey: "PYTHONPATH")
         child.environment = environment

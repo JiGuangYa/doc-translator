@@ -247,8 +247,12 @@ def import_library(source: str, kind: str = "auto", allow_keychain: bool = True,
                     job["provider_id"] = provider_map.get(old_provider, old_provider if old_provider == "mock" else None)
                     if job.get("provider_snapshot"):
                         job["provider_snapshot"]["id"] = job["provider_id"]
-                    job["requires_snapshot_confirmation"] = bool(job.get("translations")) and not job.get("provider_snapshot")
-                    job["history_usage_unknown"] = old.get("history_usage_unknown", "usage" not in old)
+                    existing = {segment["seg_id"]: segment["translation"] for segment in job.get("segments", [])
+                                if isinstance(segment.get("translation"), str) and segment["translation"]}
+                    existing.update(job.get("translations") or {})
+                    job["translations"] = existing
+                    job["requires_snapshot_confirmation"] = bool(existing) and not job.get("provider_snapshot")
+                    job["history_usage_unknown"] = old.get("history_usage_unknown", not isinstance(old.get("usage"), dict))
                     job.setdefault("source_warnings", list(job.get("warnings") or []))
                     store._atomic_write_json(staging / "job.json", job)
                     if deleted:

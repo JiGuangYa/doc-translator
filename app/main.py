@@ -29,7 +29,7 @@ from starlette.responses import Response
 from . import auth, config, desktop, i18n, store
 from . import secrets_store
 from .api import auth as auth_api
-from .api import knowledge, previews, providers, tasks
+from .api import libraries, knowledge, previews, providers, tasks
 from .services import output_transaction, pipeline, process_runner, renderer, task_manager
 from .services.rate_limit import limiter
 from . import metrics
@@ -337,3 +337,4 @@ def index():
 
 app.mount("/static", NoCacheStaticFiles(directory=config.STATIC_DIR), name="static")
 
+app.include_router(libraries.router)

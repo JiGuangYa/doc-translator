@@ -24,19 +24,6 @@ def test_alias_merge_does_not_mutate_during_iteration(monkeypatch):
     assert out["s000002"] == "T:World"
 
 
-def test_progress_counts_original_paragraphs_after_dedup_and_splitting(monkeypatch):
-    segments = _segs('Same short text', 'Same short text', 'Long sentence. ' * 80)
-    progress = []
-    monkeypatch.setattr(tr, '_translate_batch_with_retry',
-                        lambda batch, *a, **kw: {s.seg_id: 'translated' for s in batch})
-    tr.translate_segments(segments, 'p', 'auto', 'en',
-                          {'batch_max_chars': 200, 'batch_max_segments': 1, 'concurrency_batches': 3},
-                          progress_cb=lambda done, total, snapshot: progress.append((done, total, len(snapshot))))
-    assert progress[-1] == (3, 3, 3)
-    assert all(done <= total and done == size for done, total, size in progress)
-    assert [p[0] for p in progress] == sorted(p[0] for p in progress)
-
-
 def test_existing_translations_are_kept(monkeypatch):
     """Resume translation: segments that already have an entry in `existing`
     are not re-sent."""
@@ -252,7 +239,7 @@ def test_retry_after_header_honored(monkeypatch):
     def fake_create(**kwargs):
         raise FakeRateLimit("rate limited")
 
-    cl = SimpleNamespace(close=lambda: None, chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)))
+    cl = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)))
     monkeypatch.setattr(tr.client, "build_client", lambda pid: (cl, "m"))
 
     from app.formats.common import Segment
@@ -261,3 +248,76 @@ def test_retry_after_header_honored(monkeypatch):
     assert len(sleeps) == tr.config.LLM_MAX_RETRIES + 1 - 1 or sleeps
     for s in sleeps:
         assert 7 * 0.7 <= s <= min(7 * 1.3, 60), f"back-off should jitter around Retry-After=7, got {s}"
+
+
+def test_cancel_interrupts_rate_limit_wait_without_another_request(monkeypatch):
+    import threading
+    import time
+    from types import SimpleNamespace
+
+    class RateLimit(Exception):
+        status_code = 429
+        response = SimpleNamespace(headers={"retry-after": "60"})
+
+    calls = []
+    def request(*args, **kwargs):
+        calls.append(1)
+        raise RateLimit("retry later")
+
+    monkeypatch.setattr(tr.client, "chat_completion_with_metrics", request)
+    cancelled = threading.Event()
+    timer = threading.Timer(0.15, cancelled.set)
+    timer.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(tr.TranslationCancelled):
+            tr.translate_segments(_segs("First paragraph"), "p_test", "en", "fr", {},
+                                  cancel_check=cancelled.is_set)
+    finally:
+        timer.cancel()
+    assert calls == [1]
+    assert time.monotonic() - started < 1.5
+
+
+def test_cancel_after_partial_response_keeps_text_and_skips_rescue(monkeypatch):
+    import threading
+    from types import SimpleNamespace
+    cancelled = threading.Event()
+    calls = []
+    def request(*args, **kwargs):
+        calls.append(1)
+        cancelled.set()
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content='{"s000000":"Completed translation"}'))])
+    monkeypatch.setattr(tr.client, "chat_completion_with_metrics", request)
+    with pytest.raises(tr.TranslationCancelled) as failure:
+        tr.translate_segments(_segs("First paragraph", "Second paragraph"), "p_test", "en", "fr", {},
+                              cancel_check=cancelled.is_set)
+    assert failure.value.partial == {"s000000": "Completed translation"}
+    assert calls == [1]
+
+
+def test_progress_counts_complete_segments_and_duplicate_aliases(monkeypatch):
+    snapshots = []
+    monkeypatch.setattr(tr, "_translate_batch_with_retry",
+                        lambda batch, *args, **kwargs: {segment.seg_id: "Translated" for segment in batch})
+    segments = _segs("Long paragraph. " * 90, "Long paragraph. " * 90, "Short paragraph.")
+    tr.translate_segments(segments, "p_test", "en", "fr",
+                          {"batch_max_chars": 200, "batch_max_segments": 1, "concurrency_batches": 1},
+                          progress_cb=lambda done, total, snapshot: snapshots.append((done, total, snapshot)))
+    assert snapshots[-1][0:2] == (3, 3)
+    assert all(done <= total for done, total, _ in snapshots)
+    assert all(not any("#p" in key for key in snapshot) for _, _, snapshot in snapshots)
+
+
+def test_progress_counts_original_paragraphs_after_dedup_and_splitting(monkeypatch):
+    segments = _segs('Same short text', 'Same short text', 'Long sentence. ' * 80)
+    progress = []
+    monkeypatch.setattr(tr, '_translate_batch_with_retry',
+                        lambda batch, *a, **kw: {s.seg_id: 'translated' for s in batch})
+    tr.translate_segments(segments, 'p', 'auto', 'en',
+                          {'batch_max_chars': 200, 'batch_max_segments': 1, 'concurrency_batches': 3},
+                          progress_cb=lambda done, total, snapshot: progress.append((done, total, len(snapshot))))
+    assert progress[-1] == (3, 3, 3)
+    assert all(done <= total and done == size for done, total, size in progress)
+    assert [p[0] for p in progress] == sorted(p[0] for p in progress)

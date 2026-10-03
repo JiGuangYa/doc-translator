@@ -64,7 +64,7 @@ def test_resume_cannot_mix_target_languages(tmp_path, monkeypatch):
     tid = uuid.uuid4().hex
     store.save_job(tid, {'task_id': tid, 'status': 'cancelled', 'provider_id': 'p', 'source_lang': 'auto',
                         'target_lang': 'zh-CN', 'translations': {'s000000': '已完成'}})
-    with pytest.raises(ValueError, match='original provider and languages'):
+    with pytest.raises(ValueError, match='change languages'):
         pipeline.start_translation(tid, 'p', 'auto', 'en')
 
 
@@ -86,12 +86,13 @@ def test_partial_settings_update_preserves_provider(client, monkeypatch, tmp_pat
 def test_office_preview_records_both_page_counts(tmp_path, monkeypatch):
     monkeypatch.setattr(config, 'TASKS_DIR', tmp_path)
     monkeypatch.setattr(config, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(renderer, 'genoffice_path', lambda: None)
     monkeypatch.setattr(renderer, 'soffice_path', lambda: 'fake-soffice')
     tid = uuid.uuid4().hex
     store.save_job(tid, {'task_id': tid, 'ext': '.docx', 'content_version': 3})
     for variant in ('original', 'translated'):
         (store.task_dir(tid) / f'{variant}.docx').write_bytes(b'test')
-    def convert(soffice, src, outdir, tag):
+    def convert(soffice, src, outdir, tag, cancel_event=None):
         outdir.mkdir(parents=True, exist_ok=True)
         pdf = fitz.open()
         for _ in range(1 if src.stem == 'original' else 2):
@@ -117,7 +118,7 @@ def test_resume_freezes_provider_and_settings_without_copying_secrets(client, mo
     provider = {'id': 'p', 'name': 'Original', 'base_url': 'http://127.0.0.1:9999/v1',
                 'model': 'first-model', 'api_key': 'must-not-be-copied'}
     monkeypatch.setattr(store, 'get_provider', lambda _: dict(provider))
-    monkeypatch.setattr(task_manager, 'submit', lambda fn, _: fn())
+    monkeypatch.setattr(task_manager, 'submit', lambda fn, tid: task_manager._wrap(fn, tid))
     monkeypatch.setattr(renderer, 'auto_render_after_done', lambda *args: None)
     doc = Document()
     doc.add_paragraph('First paragraph.')

@@ -2,11 +2,6 @@
 import pytest
 
 
-@pytest.fixture(autouse=True)
-def reset_secret_backend(monkeypatch):
-    monkeypatch.setattr("app.secrets_store._BACKEND", None)
-
-
 class _FakeKeyring:
     """In-memory keyring replacement.
 

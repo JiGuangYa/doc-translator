@@ -14,31 +14,13 @@ from pathlib import Path
 
 import pymupdf as fitz
 
-from .common import ExtractResult, Segment, WriteReport, make_seg_id
+from .common import ExtractResult, FormatAdapterError, Segment, WriteReport, make_seg_id
+from . import pdf_layout
 
 # Line merge parameters: the next line is appended to this segment only if
 # the y gap is less than 1.8x the line height and the left indent is similar.
 _MERGE_GAP_FACTOR = 1.8
 _MERGE_INDENT_TOL = 3.0   # left edge x0 tolerance (pt)
-_MIN_FONT_SIZE = 4.0      # lower bound for adaptive shrinking (pt)
-_RECT_PAD = 1.0           # padding around the write rectangle (pt)
-
-# target_lang prefix -> PyMuPDF built-in CJK font name (includes Latin glyphs, can mix CJK and Latin)
-_CJK_FONTS = {"zh": "china-s", "ja": "japan", "ko": "korea"}
-
-
-def _pick_font(target_lang: str | None, text: str | None = None) -> str:
-    # The user may revise a Chinese-target segment back to Latin text.
-    # Built-in CJK PDF fonts use full-width Latin metrics in insert_textbox.
-    if text is not None and all(ord(char) < 256 for char in text):
-        return "helv"
-    lang = (target_lang or "").lower()
-    for prefix, font in _CJK_FONTS.items():
-        if lang.startswith(prefix):
-            return font
-    return "helv"  # Use built-in Helvetica for non-CJK target languages
-
-
 def _int_to_rgb(color) -> tuple[float, float, float]:
     """span color int (0xRRGGBB) -> 0-1 RGB tuple."""
     try:
@@ -48,6 +30,36 @@ def _int_to_rgb(color) -> tuple[float, float, float]:
     if c < 0:
         return (0.0, 0.0, 0.0)
     return ((c >> 16 & 255) / 255, (c >> 8 & 255) / 255, (c & 255) / 255)
+
+
+def normalized_box(page, bbox) -> list[float]:
+    """Image-relative, bottom-left coordinates shared with Apple Vision."""
+    visible = (fitz.Rect(bbox) * page.rotation_matrix) & page.rect
+    width, height = page.rect.width, page.rect.height
+    return [max(0, min(1, visible.x0 / width)), max(0, min(1, 1 - visible.y1 / height)),
+            max(0, min(1, visible.x1 / width)), max(0, min(1, 1 - visible.y0 / height))]
+
+
+def inspect_ocr_pages(path: Path) -> dict:
+    """Find scan pages without treating every photograph in a text PDF as a scan."""
+    required, optional = [], []
+    with fitz.open(path) as document:
+        for number, page in enumerate(document, 1):
+            text = page.get_text().strip()
+            raw = page.get_text("dict", flags=fitz.TEXTFLAGS_DICT & ~fitz.TEXT_PRESERVE_IMAGES)
+            rotated = any(tuple(line.get("dir", (1.0, 0.0))) != (1.0, 0.0)
+                          for block in raw.get("blocks", []) for line in block.get("lines", []))
+            images = page.get_image_info()
+            area = max(1, page.rect.width * page.rect.height)
+            image_area = sum(max(0, (fitz.Rect(image["bbox"]) * page.rotation_matrix & page.rect).get_area())
+                             for image in images)
+            if images:
+                optional.append(number)
+            sparse = len("".join(text.split())) < 50
+            if rotated or (images and (not text or image_area / area >= 0.8 or sparse and image_area / area >= 0.25)) or (
+                    not text and not images and page.get_drawings()):
+                required.append(number)
+        return {"pages": document.page_count, "required": required, "optional": optional}
 
 
 # ---------- extraction ----------
@@ -79,7 +91,7 @@ def _merge_text(parts: list[str]) -> str:
     return out.strip()
 
 
-def _build_segment(parts: list[tuple[str, list[float], list[dict]]], page_index: int) -> Segment:
+def _build_segment(parts: list[tuple[str, list[float], list[dict]]], page_index: int, page) -> Segment:
     """Pack merged line groups into a Segment; meta records the information
     needed for positioning."""
     all_spans = [s for _, _, sps in parts for s in sps]
@@ -98,6 +110,11 @@ def _build_segment(parts: list[tuple[str, list[float], list[dict]]], page_index:
             "size": Counter(sizes).most_common(1)[0][0],  # mode of font sizes
             "color": Counter(colors).most_common(1)[0][0],
             "font": Counter(fonts).most_common(1)[0][0],
+            "span_bboxes": [list(span["bbox"]) for span in all_spans],
+            "normalized_bbox": normalized_box(page, bbox),
+            "normalized_span_bboxes": [normalized_box(page, span["bbox"]) for span in all_spans],
+            "lines": [{"text": text, "bbox": box, "span_bboxes": [list(span["bbox"]) for span in spans]}
+                      for text, box, spans in parts],
         },
     )
 
@@ -112,14 +129,14 @@ def _extract_pages(doc) -> tuple[list[Segment], int]:
     rotated = 0
 
     for pno, page in enumerate(doc):
-        raw = page.get_text("dict")
+        raw = page.get_text("dict", flags=fitz.TEXTFLAGS_DICT & ~fitz.TEXT_PRESERVE_IMAGES)
         for block in raw.get("blocks", []):
             lines = block.get("lines") or []
             cur: list[tuple[str, list[float], list[dict]]] = []
 
             def flush():
                 if cur:
-                    segments.append(_build_segment(cur, pno))
+                    segments.append(_build_segment(cur, pno, page))
                     cur.clear()
 
             for line in lines:
@@ -181,72 +198,180 @@ def extract(path: Path, options: dict) -> ExtractResult:
 
 # ---------- write-back ----------
 
-def _prepare_fitted(page, rect: fitz.Rect, text: str, fontname: str,
-                    size: float, rgb: tuple):
-    """Lay out an uncommitted shape before removing any source text.
+def validate_writeback(path: Path, options: dict) -> None:
+    if options.get("no_translation"):
+        return
+    with fitz.open(path) as document:
+        pdf_layout.validate_source(document, bilingual=options.get("ocr_scanned", False))
 
-    Use the writer's actual font metrics, rather than an estimate that can
-    disagree with CJK wrapping. A failed fit leaves the source untouched.
-    """
-    floor = min(_MIN_FONT_SIZE, size)
-    candidate = float(size)
-    while True:
-        shape = page.new_shape()
-        if shape.insert_textbox(rect, text, fontname=fontname, fontsize=candidate, color=rgb) >= 0:
-            return candidate
-        if candidate <= floor:
-            return None
-        candidate = max(floor, round(candidate * 0.9, 2))
+
+def _redaction_strips(boxes) -> list:
+    strips = []
+    for box in boxes:
+        rect = fitz.Rect(box)
+        middle = (rect.y0 + rect.y1) / 2
+        strips.append(fitz.Rect(rect.x0 + 0.001, middle - 0.05, rect.x1 - 0.001, middle + 0.05))
+    return strips
+
+
+def _placement(segment, text):
+    lines = segment.meta.get("lines") or []
+    markers = [line for line in lines if line["text"].strip() in {"•", "●", "▪", "‣", "◦", "·"}]
+    content = [line for line in lines if line not in markers]
+    if markers and content:
+        # Legacy extraction sometimes merged a following bullet with an intro
+        # line. Keep that bullet at its original location, without renumbering IDs.
+        for marker in markers:
+            text = text.replace(marker["text"].strip(), "", 1)
+        rectangle = fitz.Rect(content[0]["bbox"])
+        for line in content[1:]:
+            rectangle |= fitz.Rect(line["bbox"])
+        boxes = [box for line in content for box in line["span_bboxes"]]
+    else:
+        rectangle = fitz.Rect(segment.meta["bbox"])
+        boxes = segment.meta.get("span_bboxes", [segment.meta["bbox"]])
+    return text.strip(), rectangle, _redaction_strips(boxes)
 
 
 def write_back(src_path: Path, dst_path: Path,
                translations: dict[str, str], options: dict) -> WriteReport:
     report = WriteReport()
     if not translations:
-        shutil.copy2(src_path, dst_path)  # no translations -> copy as-is
+        shutil.copy2(src_path, dst_path)
         return report
-
-    # Open the source file read-only and save out to the destination.
-    # (Cannot open(dst) and then save(dst): PyMuPDF only allows incremental
-    # save on an already-opened original.)
-    doc = fitz.open(src_path)
+    document = fitz.open(src_path)
     try:
-        # Re-extract to build the seg_id -> positioning mapping
-        # (consistent algorithm => numbering matches the pipeline)
-        segments, _rotated = _load_segments(src_path)
-        numbered = {seg.seg_id: seg for seg in segments}
-        # Step 1: pre-check font-size fit before redaction; segments that
-        # don't fit keep their original text and are neither redacted nor written.
-        jobs: dict[int, list[tuple]] = {}
-        for seg_id, translated in translations.items():
-            seg = numbered.get(seg_id)
-            if seg is None or not (translated or "").strip():
-                continue
-            x0, y0, x1, y1 = seg.meta["bbox"]
-            rect = fitz.Rect(x0 - _RECT_PAD, y0 - _RECT_PAD, x1 + _RECT_PAD, y1 + _RECT_PAD)
-            page = doc[seg.meta["page"] - 1]
-            fontname = _pick_font(options.get("target_lang"), translated)
-            rgb = _int_to_rgb(seg.meta.get("color"))
-            size = _prepare_fitted(page, rect, translated, fontname, float(seg.meta.get("size", 11.0)), rgb)
-            if size is None:
-                report.overflow.append(seg_id)
-                continue
-            jobs.setdefault(seg.meta["page"], []).append((rect, translated, fontname, size, rgb))
-
-        # Redaction can rebuild font resources, so insert fresh shapes using
-        # the exact font/size that passed the real layout preflight.
-        for pno in sorted(jobs):
-            page = doc[pno - 1]
-            for rect, *_ in jobs[pno]:
-                page.add_redact_annot(rect)
-            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=0)
-            for rect, text, fontname, size, rgb in jobs[pno]:
-                if page.insert_textbox(rect, text, fontname=fontname, fontsize=size, color=rgb) < 0:
-                    from .common import FormatAdapterError
-                    raise FormatAdapterError(f"Page {pno}: PDF text layout changed during export; the previous output has been kept")
-                report.written += 1
-
-        doc.save(dst_path, deflate=True)
+        pdf_layout.validate_source(document)
+        segments, _ = _load_segments(src_path)
+        pages = {}
+        for segment in segments:
+            pages.setdefault(segment.meta["page"], []).append(segment)
+        for number, entries in pages.items():
+            page = document[number - 1]
+            original_annotations = pdf_layout.annotation_array(page)
+            raw = page.get_text("dict", flags=fitz.TEXTFLAGS_DICT & ~fitz.TEXT_PRESERVE_IMAGES)
+            rotated_boxes = [fitz.Rect(span["bbox"]) for block in raw.get("blocks", [])
+                             for line in block.get("lines", []) if tuple(line.get("dir", (1.0, 0.0))) != (1.0, 0.0)
+                             for span in line.get("spans", [])]
+            plans = []
+            try:
+                for segment in entries:
+                    text = translations.get(segment.seg_id)
+                    if not text or not text.strip():
+                        continue
+                    if text == segment.text:
+                        report.written += 1
+                        continue
+                    text, rectangle, strips = _placement(segment, text)
+                    if not text:
+                        report.overflow.append(segment.seg_id)
+                        continue
+                    # Prevent removal of a neighbouring text block. Narrow strips
+                    # remove the intended glyphs without painting over the background.
+                    other_boxes = [fitz.Rect(box) for other in entries if other.seg_id != segment.seg_id
+                                   for box in other.meta.get("span_bboxes", [other.meta["bbox"]])]
+                    overlaps = any(any(strip.intersects(box) for strip in strips) or
+                                   rectangle.contains((box.tl + box.br) / 2) for box in other_boxes)
+                    overlaps = overlaps or any(any(strip.intersects(box) for strip in strips) or
+                                               rectangle.contains((box.tl + box.br) / 2)
+                                               for box in rotated_boxes)
+                    if overlaps:
+                        report.overflow.append(segment.seg_id)
+                        report.warnings.append(f"Page {number}: overlapping text kept in its original form")
+                        continue
+                    page_width = page.cropbox.width
+                    centered = (segment.meta.get("size", 11) >= 14 and rectangle.x0 > page_width * 0.2 and
+                                abs((rectangle.x0 + rectangle.x1) / 2 - page_width / 2) < page_width * 0.015)
+                    fragment = pdf_layout.render_text(
+                        text, rectangle.width, rectangle.height, segment.meta.get("size", 11),
+                        color=_int_to_rgb(segment.meta.get("color")), font=segment.meta.get("font", ""),
+                        align="center" if centered else "left")
+                    if fragment is None:
+                        report.overflow.append(segment.seg_id)
+                        continue
+                    plans.append((segment.seg_id, rectangle, strips, fragment))
+                if plans:
+                    for _identifier, _rectangle, strips, _fragment in plans:
+                        for strip in strips:
+                            page.add_redact_annot(strip, fill=False, cross_out=False)
+                    page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=0)
+                    # Redaction removes overlapping links. The original annotation
+                    # objects remain valid; restore their references and metadata.
+                    document.xref_set_key(page.xref, "Annots", original_annotations)
+                    for identifier, rectangle, _strips, fragment in plans:
+                        try:
+                            page.show_pdf_page(rectangle, fragment, 0)
+                        except Exception as error:
+                            raise FormatAdapterError(
+                                f"Page {number}, {identifier}: PDF text could not be written safely; export stopped") from error
+                        report.written += 1
+            finally:
+                for _identifier, _rectangle, _strips, fragment in plans:
+                    fragment.close()
+        document.save(dst_path, deflate=True)
     finally:
-        doc.close()
+        document.close()
+    return report
+
+
+def write_scanned_bilingual(src_path: Path, dst_path: Path, translations: dict[str, str],
+                            segments: list[dict], options: dict) -> WriteReport:
+    """Keep each original page unchanged beside searchable, shaped Unicode text."""
+    report = WriteReport()
+    if not translations and not any(segment.get("translatable") for segment in segments):
+        shutil.copy2(src_path, dst_path)
+        report.warnings.append("No text requires translation; original PDF preserved")
+        return report
+    by_page = {}
+    for segment in segments:
+        by_page.setdefault(int(segment["meta"]["page"]), []).append(segment)
+    source = fitz.open(src_path)
+    output = fitz.open()
+    try:
+        pdf_layout.validate_source(source, bilingual=True)
+        for page_index, original in enumerate(source):
+            entries = by_page.get(page_index + 1, [])
+            pieces = []
+            for entry in entries:
+                translated = translations.get(entry["seg_id"])
+                if translated:
+                    pieces.append(translated)
+                    report.written += 1
+                elif entry.get("translatable"):
+                    pieces.append("[Untranslated] " + entry["text"])
+                else:
+                    pieces.append(entry["text"])
+            width, original_height = float(original.rect.width), float(original.rect.height)
+            fragment = None
+            try:
+                if pieces:
+                    text_width = max(80, width - 44)
+                    fragment = pdf_layout.render_text("\n\n".join(pieces), text_width, None,
+                                                       10, minimum_size=10)
+                    output_width = width + max(text_width, fragment[0].rect.width if fragment else 0) + 64
+                    if fragment is None or output_width > 14400:
+                        raise FormatAdapterError(f"Translation for page {page_index + 1} exceeds PDF export limits")
+                    height = max(original_height, fragment[0].rect.height + 56)
+                    page = output.new_page(width=output_width, height=height)
+                else:
+                    page = output.new_page(width=width, height=original_height)
+                if original.read_contents().strip():
+                    pdf_layout.show_original_page(page, fitz.Rect(0, 0, width, original_height), source, page_index)
+                if fragment is not None:
+                    page.draw_line(fitz.Point(width + 10, 20), fitz.Point(width + 10, page.rect.height - 20),
+                                   color=(0.7, 0.7, 0.7))
+                    right = fitz.Rect(width + 30, 28, width + 30 + fragment[0].rect.width,
+                                      28 + fragment[0].rect.height)
+                    page.show_pdf_page(right, fragment, 0)
+            finally:
+                if fragment is not None:
+                    fragment.close()
+        # All target pages must exist before copying internal page destinations.
+        for page_index, original in enumerate(source):
+            pdf_layout.copy_page_links(original, output[page_index])
+        output.save(dst_path, deflate=True)
+    finally:
+        output.close()
+        source.close()
+    report.warnings.append("PDF exported as bilingual pages; original page contents were preserved")
     return report

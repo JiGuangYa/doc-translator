@@ -53,6 +53,7 @@ def test_try_mark_submitted_dedup():
     finally:
         task_manager.mark_finished(tid)
     assert task_manager.try_mark_submitted(tid) is True, "after the previous one finishes, another submission should be allowed"
+    task_manager.mark_finished(tid)
 
 
 def test_revise_rejected_while_translating(tmp_path, monkeypatch):

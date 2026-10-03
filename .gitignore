@@ -19,3 +19,14 @@ macos/.pyinstaller/
 macos/dist
 macos/*.spec
 macos/qa-output/
+
+.integration-reference/
+.integration-venv/
+build/
+macos/qa-output/
+macos/.build/
+macos/.pyinstaller/
+*.app/
+*.zip
+
+.DS_Store

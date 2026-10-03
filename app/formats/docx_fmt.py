@@ -8,7 +8,7 @@ order, and match by seg_id.
 import shutil
 from pathlib import Path
 
-from .common import ExtractResult, Segment, WriteReport
+from .common import ExtractResult, FormatAdapterError, Segment, WriteReport
 
 # python-docx's oxml elements provide a pre-registered-namespace xpath method
 # (but without the mc prefix; mc needs the Clark-notation full name), no need
@@ -104,6 +104,14 @@ def _ordered_items(doc):
 
 
 def extract(path: Path, options: dict) -> ExtractResult:
+    if options.get("docx_version", 1) not in (1, 2, 3):
+        raise FormatAdapterError("This Word task requires a newer app version")
+    if options.get("docx_version") == 3:
+        from . import docx_macbook
+        return docx_macbook.extract(path, options)
+    if options.get("docx_version", 1) == 2:
+        from . import docx_structured
+        return docx_structured.extract(path)
     from docx import Document
 
     doc = Document(str(path))
@@ -117,12 +125,41 @@ def extract(path: Path, options: dict) -> ExtractResult:
         text = _para_text(p)
         if not text.strip():
             continue  # empty paragraphs are not included in the result
-        segments.append(Segment(seg_id="", text=text, context=ctx))
+        seg_id = f"s{len(segments):06d}"
+        has_hyperlink = bool(p.xpath(".//w:hyperlink"))
+        if has_hyperlink:
+            warnings.append(
+                f"Paragraph {seg_id} contains a hyperlink; its original text will be kept "
+                "to preserve the clickable link")
+        elif len(p.xpath(_RUN_XPATH)) > 1:
+            from lxml import etree
+            styles = {etree.tostring(r.xpath("./w:rPr")[0]) if r.xpath("./w:rPr") else b""
+                      for r in p.xpath(_RUN_XPATH)}
+            if len(styles) > 1:
+                warnings.append(f"Paragraph {seg_id} has mixed inline styles; review its translated formatting")
+        segments.append(Segment(seg_id="", text=text, context=ctx,
+                                meta={"skip_translation": has_hyperlink} if has_hyperlink else {}))
     return ExtractResult(segments=segments, skipped_count=skipped, warnings=warnings)
+
+
+def validate_writeback(path: Path, options: dict):
+    if options.get("docx_version", 1) not in (1, 2, 3):
+        raise FormatAdapterError("This Word task requires a newer app version")
+    if options.get("docx_version", 1) == 2 and not options.get("no_translation"):
+        from . import docx_structured
+        docx_structured.extract(path)
 
 
 def write_back(src_path: Path, dst_path: Path, translations: dict[str, str],
                options: dict) -> WriteReport:
+    if options.get("docx_version", 1) not in (1, 2, 3):
+        raise FormatAdapterError("This Word task requires a newer app version")
+    if options.get("docx_version") == 3:
+        from . import docx_macbook
+        return docx_macbook.write_back(src_path, dst_path, translations, options)
+    if options.get("docx_version", 1) == 2:
+        from . import docx_structured
+        return docx_structured.write_back(src_path, dst_path, translations)
     from docx import Document
 
     shutil.copy2(src_path, dst_path)
@@ -142,15 +179,25 @@ def write_back(src_path: Path, dst_path: Path, translations: dict[str, str],
         translation = translations.get(seg_id)
         if not translation:
             continue
+        if translation == text:
+            report.written += 1
+            continue  # preserve every run, hyperlink, and style byte-for-byte
+        if p.xpath(".//w:hyperlink"):
+            report.warnings.append(
+                f"Paragraph {seg_id} kept its original text to preserve a clickable hyperlink")
+            continue
         runs = p.xpath(_RUN_XPATH)
         if not runs:
             continue
-        # Pick the first run with rPr as the style carrier, else fall back to the first run
-        carrier = next((r for r in runs if r.xpath("./w:rPr")), runs[0])
+        # Prefer an unstyled run so a translated sentence does not inherit
+        # bold/italic formatting from a short fragment at the start.
+        carrier = next((r for r in runs if not r.xpath("./w:rPr")), runs[0])
         t_elems = carrier.xpath("./w:t")
         t = t_elems[0]
         t.text = translation
         t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        for other_t in t_elems[1:]:
+            other_t.text = ""
         # Clear the remaining w:t (keep node structure, do not affect other formatting)
         for r in runs:
             if r is carrier:

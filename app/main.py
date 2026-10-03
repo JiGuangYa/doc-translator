@@ -29,8 +29,8 @@ from starlette.responses import Response
 from . import auth, config, desktop, i18n, store
 from . import secrets_store
 from .api import auth as auth_api
-from .api import previews, providers, tasks
-from .services import renderer, task_manager
+from .api import knowledge, previews, providers, tasks
+from .services import output_transaction, pipeline, process_runner, renderer, task_manager
 from .services.rate_limit import limiter
 from . import metrics
 
@@ -134,7 +134,7 @@ class MetricsMiddleware(BaseHTTPMiddleware):
         return response
 
 
-_SHUTDOWN_TIMEOUT_S = 30  # Max seconds to wait for in-flight tasks to clear after SIGTERM.
+_SHUTDOWN_TIMEOUT_S = 150 if config.DESKTOP_MODE else 30
 _shutting_down = False
 
 
@@ -145,21 +145,32 @@ def is_shutting_down() -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _shutting_down
+    _shutting_down = False
     # v0.2.0: one-time migration of legacy XOR ciphertext in providers.json to secrets_store.
     if secrets_store.migrate_legacy_xor():
         logging.info("Migrated legacy provider API keys from XOR ciphertext to encrypted key store")
-    store.recover_task_files()
+    task_manager.reset_shutdown()
+    process_runner.reset_shutdown()
+    renderer.reset_shutdown()
+    output_transaction.recover()
     task_manager.recover_on_startup()
     renderer.recover_stale()
-    removed = store.gc_old_tasks(config.TASK_TTL_DAYS)
+    retention_days = store.load_settings().get("task_retention_days", config.TASK_TTL_DAYS)
+    removed = store.gc_old_tasks(retention_days)
     if removed:
         logging.info("Cleaned up %d terminal tasks older than %d days: %s",
-                     len(removed), config.TASK_TTL_DAYS, ", ".join(removed[:10]))
+                     len(removed), retention_days, ", ".join(removed[:10]))
+    store.gc_old_previews()
+    store.gc_trash()
+    pipeline.resume_queued()
     yield
     # Graceful shutdown: when uicorn receives SIGTERM, FastAPI shutdown is triggered;
     # this block runs after the yield above.
-    global _shutting_down
     _shutting_down = True
+    task_manager.begin_shutdown()
+    process_runner.begin_shutdown()
+    renderer.shutdown()
     in_flight = task_manager.count_in_flight()
     if in_flight > 0:
         logging.info("Shutting down: waiting for %d in-flight tasks to finish (timeout %ds) ...", in_flight, _SHUTDOWN_TIMEOUT_S)
@@ -240,6 +251,9 @@ def _is_exempt(path: str) -> bool:
 
 @app.middleware("http")
 async def local_guard(request: Request, call_next):
+    if desktop.enabled():
+        if not desktop.authenticated(request.headers.get("X-DocTranslator-Token", "")):
+            return JSONResponse({"detail": "Invalid desktop session"}, status_code=401)
     host = request.headers.get("host", "")
     if host and host not in _ALLOWED_HOSTS:
         return JSONResponse({"detail": "Invalid Host"}, status_code=403)
@@ -254,10 +268,6 @@ async def local_guard(request: Request, call_next):
     # Cookie validation runs after Origin checks so cross-site writes are rejected first
     # without burning a session lookup.
     path = request.url.path
-    if desktop.enabled():
-        if not desktop.authenticated(request.headers.get("X-DocTranslator-Token", "")):
-            return JSONResponse({"detail": "Invalid desktop session"}, status_code=401)
-        return await call_next(request)
     if path.startswith("/api/") and not _is_exempt(path):
         token = request.cookies.get(auth.cookie_name())
         if not auth.validate_session(token):
@@ -316,6 +326,7 @@ def i18n_catalog(lang: str):
 app.include_router(auth_api.router)
 app.include_router(tasks.router)
 app.include_router(providers.router)
+app.include_router(knowledge.router)
 app.include_router(previews.router)
 
 
@@ -325,3 +336,4 @@ def index():
 
 
 app.mount("/static", NoCacheStaticFiles(directory=config.STATIC_DIR), name="static")
+

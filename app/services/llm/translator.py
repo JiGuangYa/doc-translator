@@ -1,5 +1,6 @@
 """Batch translation engine: batching, dedup, JSON fault tolerance, missing-filling, backoff retry, resume."""
 import json
+import hashlib
 import logging
 import random
 import threading
@@ -110,7 +111,7 @@ def make_batches(segments: list, max_chars: int, max_count: int) -> list[list]:
     the token-weighted measure (see _weighted_len)."""
     batches, current, chars = [], [], 0
     for seg in segments:
-        seg_len = _weighted_len(seg.text)
+        seg_len = _weighted_len(seg.text) + _weighted_len(seg.meta.get("translation_context", ""))
         if current and (chars + seg_len > max_chars or len(current) >= max_count):
             batches.append(current)
             current, chars = [], 0
@@ -121,14 +122,20 @@ def make_batches(segments: list, max_chars: int, max_count: int) -> list[list]:
     return batches
 
 
+def _contexts(batch) -> dict[str, str]:
+    return {segment.seg_id: segment.meta["translation_context"] for segment in batch
+            if segment.meta.get("translation_context")}
+
+
 def translate_segments(segments: list, provider_id: str, source_lang: str, target_lang: str,
                        settings: dict, existing: dict[str, str] | None = None,
-                       progress_cb=None, cancel_check=None, provider_snapshot: dict | None = None) -> dict[str, str]:
+                       progress_cb=None, cancel_check=None, usage_cb=None,
+                       existing_parts: dict | None = None, checkpoint_cb=None, provider_snapshot=None) -> dict[str, str]:
     """Translate a batch of segments, returning {seg_id: translation} (including any pre-existing ones).
 
     - Same-source dedup: identical source text is sent for translation only once.
     - Resume: seg_ids already in `existing` are skipped.
-    - progress_cb(done, total, snapshot): counts complete original segments; snapshot is the cumulative
+    - progress_cb(done, total, snapshot): counts unique segments; snapshot is the cumulative
       set of new translations (with alias expansion) so the caller can periodically persist.
       On crash, the persisted portion can be used to resume.
     - cancel_check() returning True raises TranslationCancelled between batches (carries
@@ -147,14 +154,22 @@ def translate_segments(segments: list, provider_id: str, source_lang: str, targe
     # If any single segment exceeds the budget, split it at the sentence level so an oversized
     # paragraph doesn't end up alone in a batch that still overflows the context window.
     batchable, piece_map = _split_oversized(unique, max_chars)
-    batches = make_batches(batchable, max_chars,
+    cached_parts = {}
+    for segment in batchable:
+        saved = (existing_parts or {}).get(segment.seg_id, {})
+        if ("#p" in segment.seg_id and isinstance(saved, dict) and
+                saved.get("source_sha256") == hashlib.sha256(segment.text.encode()).hexdigest() and
+                saved.get("source_lang") == source_lang and saved.get("target_lang") == target_lang and
+                isinstance(saved.get("translation"), str) and saved["translation"].strip() and
+                not common.is_untranslated(saved["translation"])):
+            cached_parts[segment.seg_id] = saved["translation"]
+    batches = make_batches([segment for segment in batchable if segment.seg_id not in cached_parts], max_chars,
                            settings.get("batch_max_segments", 20))
     concurrency = max(1, int(settings.get("concurrency_batches", 3)))
 
     lock = threading.Lock()
-    report_lock = threading.Lock()
     total = len(existing) + len(todo)
-    batch_outputs: list[dict] = []  # Each thread appends {seg_id: translation}; merged on read.
+    batch_outputs: list[dict] = [cached_parts]  # Completed pieces can survive an interrupted paragraph.
 
     def _merge_outputs_locked() -> dict[str, str]:
         merged: dict[str, str] = {}
@@ -177,28 +192,42 @@ def translate_segments(segments: list, provider_id: str, source_lang: str, targe
         return _expand_aliases(_reassemble_pieces(merged, piece_map))
 
     def report():
-        if not progress_cb:
-            return
-        # Count complete original paragraphs, not split pieces or requests.
-        # Serialize checkpoint callbacks so a slower earlier write cannot
-        # move the progress counter backwards under concurrent batches.
-        with report_lock:
-            with lock:
-                snap = dict(_merge_outputs_locked())
-            snap = _expand_aliases(_reassemble_pieces(snap, piece_map))
-            progress_cb(len(existing) + len(snap), total, snap)
+        with lock:
+            snap = _expand_aliases(_reassemble_pieces(_merge_outputs_locked(), piece_map))
+            done = len(existing) + sum(segment.seg_id in snap for segment in todo)
+        # Run the callback outside the lock — callbacks may do disk IO (incremental persist)
+        # and we don't want them to block other threads.
+        if progress_cb:
+            progress_cb(done, total, snap)
 
     def run_batch(batch) -> bool:
         """Returns success status; failures do not raise (the wave-level tally decides whether to abort)."""
         if cancel_check and cancel_check():
             raise TranslationCancelled()
+        extra = {}
+        if provider_snapshot:
+            extra["provider_snapshot"] = provider_snapshot
+        if settings.get("glossary"):
+            extra["glossary"] = settings["glossary"]
+        if usage_cb:
+            extra["usage_cb"] = usage_cb
+        if cancel_check:
+            extra["cancel_check"] = cancel_check
         translated = _translate_batch_with_retry(batch, provider_id, source_lang, target_lang,
-                                                  provider_snapshot=provider_snapshot)
+                                                 **extra)
         if not translated:
             report()
             return False
         with lock:
             batch_outputs.append(translated)
+        if checkpoint_cb:
+            pieces = {segment.seg_id: {
+                "source_sha256": hashlib.sha256(segment.text.encode()).hexdigest(),
+                "source_lang": source_lang, "target_lang": target_lang,
+                "translation": translated[segment.seg_id]}
+                for segment in batch if "#p" in segment.seg_id and translated.get(segment.seg_id)}
+            if pieces:
+                checkpoint_cb(pieces)
         report()
         return True
 
@@ -222,7 +251,7 @@ def translate_segments(segments: list, provider_id: str, source_lang: str, targe
             # Exiting the `with` block waits for the wave to fully finish: any in-flight batch
             # in the wave completes normally and its output is recorded into batch_outputs
             # via run_batch, so cancel does not lose the wave's completed work.
-        if cancelled:
+        if cancelled or cancel_check and cancel_check():
             raise TranslationCancelled(partial=partial_results())
         if outcomes and not any(outcomes):
             failed_waves += 1
@@ -262,7 +291,22 @@ def _retry_after_seconds(e: Exception) -> float | None:
     return v if v >= 0 else None
 
 
-def _translate_batch_with_retry(batch, provider_id, source_lang, target_lang, provider_snapshot=None) -> dict[str, str] | None:
+def _wait_before_retry(delay: float, cancel_check=None) -> None:
+    if not cancel_check:
+        time.sleep(delay)
+        return
+    deadline = time.monotonic() + delay
+    while True:
+        if cancel_check():
+            raise TranslationCancelled()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.1, remaining))
+
+
+def _translate_batch_with_retry(batch, provider_id, source_lang, target_lang,
+                                glossary=None, usage_cb=None, cancel_check=None, provider_snapshot=None) -> dict[str, str] | None:
     """Translate a single batch with three layers of fault tolerance. Returns None when all
     layers fail (caller counts failures).
 
@@ -273,24 +317,28 @@ def _translate_batch_with_retry(batch, provider_id, source_lang, target_lang, pr
     last_error = None
     # Network / 429 backoff retry.
     for attempt in range(config.LLM_MAX_RETRIES + 1):
+        if cancel_check and cancel_check():
+            raise TranslationCancelled()
         try:
             resp = client.chat_completion_with_metrics(
                 provider_id,
-                provider_snapshot=provider_snapshot,
-                temperature=0.1,
+                _usage_callback=usage_cb, _provider_snapshot=provider_snapshot,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user",
                      "content": build_user_prompt(json.dumps(payload, ensure_ascii=False),
-                                                  source_lang, target_lang)},
+                                                  source_lang, target_lang, glossary=glossary,
+                                                  contexts=_contexts(batch))},
                 ],
             )
             parsed = _parse_response(resp.choices[0].message.content or "", set(payload))
             if parsed is not None:
-                return _fill_missing(parsed, batch, provider_id, source_lang, target_lang, provider_snapshot)
+                return _fill_missing(parsed, batch, provider_id, source_lang, target_lang,
+                                     glossary=glossary, usage_cb=usage_cb, cancel_check=cancel_check, provider_snapshot=provider_snapshot)
             last_error = "Response is not valid JSON"
             # Occasional truncation can recover on retry — same backoff + jitter applies.
-            time.sleep(min(config.LLM_BACKOFF_BASE * (2 ** attempt) * random.uniform(0.7, 1.3), 60))
+            if attempt < config.LLM_MAX_RETRIES:
+                _wait_before_retry(min(config.LLM_BACKOFF_BASE * (2 ** attempt) * random.uniform(0.7, 1.3), 60), cancel_check)
         except TranslationCancelled:
             raise
         except Exception as e:
@@ -300,7 +348,8 @@ def _translate_batch_with_retry(batch, provider_id, source_lang, target_lang, pr
                 break  # Non-transient errors: don't backoff-retry.
             ra = _retry_after_seconds(e)
             delay = ra if ra is not None else config.LLM_BACKOFF_BASE * (2 ** attempt)
-            time.sleep(min(delay * random.uniform(0.7, 1.3), 60))
+            if attempt < config.LLM_MAX_RETRIES:
+                _wait_before_retry(min(delay * random.uniform(0.7, 1.3), 60), cancel_check)
     logger.warning("Batch failed (%d segments): %s", len(batch), last_error)
     return None
 
@@ -313,11 +362,12 @@ def _parse_response(text: str, expected_ids: set[str]) -> dict | None:
     return {k: v for k, v in obj.items() if k in expected_ids and isinstance(v, str) and v.strip()}
 
 
-def _fill_missing(parsed: dict, batch, provider_id, source_lang, target_lang, provider_snapshot=None) -> dict[str, str]:
+def _fill_missing(parsed: dict, batch, provider_id, source_lang, target_lang,
+                  glossary=None, usage_cb=None, cancel_check=None, provider_snapshot=None) -> dict[str, str]:
     """At most two rescue passes for missing ids: full-batch with missing list, then small-group retry."""
     result = dict(parsed)
     missing = [s for s in batch if s.seg_id not in result]
-    if not missing:
+    if not missing or cancel_check and cancel_check():
         return result
 
     # Round 1: re-request the full batch including the explicit missing list.
@@ -325,13 +375,12 @@ def _fill_missing(parsed: dict, batch, provider_id, source_lang, target_lang, pr
         payload = {s.seg_id: s.text for s in batch}
         resp = client.chat_completion_with_metrics(
             provider_id,
-            provider_snapshot=provider_snapshot,
-            temperature=0.1,
+            _usage_callback=usage_cb, _provider_snapshot=provider_snapshot,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": build_user_prompt(
                     json.dumps(payload, ensure_ascii=False), source_lang, target_lang,
-                    missing_ids=[s.seg_id for s in missing])},
+                    missing_ids=[s.seg_id for s in missing], glossary=glossary, contexts=_contexts(batch))},
             ])
         more = _parse_response(resp.choices[0].message.content or "", set(payload))
         if more:
@@ -344,17 +393,19 @@ def _fill_missing(parsed: dict, batch, provider_id, source_lang, target_lang, pr
     if still:
         try:
             for i in range(0, len(still), 5):
+                if cancel_check and cancel_check():
+                    return result
                 group = still[i:i + 5]
                 payload = {s.seg_id: s.text for s in group}
                 try:
                     resp = client.chat_completion_with_metrics(
                         provider_id,
-                        provider_snapshot=provider_snapshot,
-                        temperature=0.1,
+                        _usage_callback=usage_cb, _provider_snapshot=provider_snapshot,
                         messages=[
                             {"role": "system", "content": SYSTEM_PROMPT},
                             {"role": "user", "content": build_user_prompt(
-                                json.dumps(payload, ensure_ascii=False), source_lang, target_lang)},
+                                json.dumps(payload, ensure_ascii=False), source_lang, target_lang,
+                                glossary=glossary, contexts=_contexts(group))},
                         ])
                     more = _parse_response(resp.choices[0].message.content or "", set(payload))
                     if more:

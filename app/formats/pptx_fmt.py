@@ -6,6 +6,8 @@ shape tree -> paragraphs), matching by seg_id. Text inside charts/SmartArt
 cannot be safely rewritten and is skipped with a warning.
 """
 import shutil
+import json
+import subprocess
 from pathlib import Path
 
 from .common import ExtractResult, Segment, WriteReport
@@ -148,6 +150,9 @@ def write_back(src_path: Path, dst_path: Path, translations: dict[str, str],
         translation = translations.get(f"s{index:06d}")
         if not translation:
             return True  # no translation -> keep original, not a failure
+        if translation == para.text:
+            report.written += 1
+            return True
         runs = list(para.runs)
         if not runs:
             report.warnings.append(
@@ -191,4 +196,20 @@ def write_back(src_path: Path, dst_path: Path, translations: dict[str, str],
                     write_para(para)
 
     prs.save(str(dst_path))
+    from ..services.renderer import genoffice_path
+    cli = genoffice_path()
+    if cli and report.written:
+        try:
+            audit = subprocess.run(
+                [cli, "slides", "audit", str(dst_path), "--json"],
+                capture_output=True, text=True, timeout=90)
+            result = json.loads(audit.stdout.strip().splitlines()[-1])
+            if audit.returncode == 0 and result.get("status") == "ok":
+                for issue in result.get("detail", {}).get("issues", []):
+                    if issue.get("code", "").startswith("text_overflow"):
+                        slide = int(issue.get("slide", 0)) + 1
+                        report.warnings.append(
+                            f"Slide {slide}: translated text may overflow its box; review in GenOffice")
+        except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
+            report.warnings.append("Slide layout audit was unavailable; review the translated deck")
     return report

@@ -22,3 +22,6 @@ prometheus-client==0.21.1
 
 # Development / CI (not installed at runtime): also requires ruff, pip-audit.
 pytest==9.1.1
+
+# Synthetic verification fixtures only.
+reportlab==5.0.1

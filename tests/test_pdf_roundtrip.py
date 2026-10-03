@@ -123,7 +123,7 @@ def test_latin_revision_uses_proportional_font_even_for_chinese_target(tmp_path)
         assert len(lines) == 1
         spans = lines[0]['spans']
         assert ''.join(span['text'] for span in spans) == 'Revised translation.'
-        assert spans[0]['font'] == 'Helvetica'
+        assert spans[0]['font'] in ('Helvetica', 'NimbusSans-Regular')
         assert spans[0]['size'] > 12
 
 

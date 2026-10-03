@@ -125,6 +125,7 @@ _REDACT_KEYS = frozenset({
     "token", "session", "session_token", "auth",
     "secret", "credential", "credentials",
     "api_key_enc",  # legacy XOR ciphertext
+    "base_url",  # some gateways embed bearer tokens in query strings
 })
 
 

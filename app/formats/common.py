@@ -55,6 +55,9 @@ def filter_translatable(segments: list[Segment]) -> tuple[list[Segment], int]:
     from ..utils import is_translatable
     kept, skipped = [], 0
     for seg in segments:
+        if seg.meta.get("skip_translation"):
+            skipped += 1
+            continue
         ok, _reason = is_translatable(seg.text)
         if ok:
             kept.append(seg)
@@ -68,9 +71,9 @@ def dedupe_segments(segments: list[Segment]) -> tuple[list[Segment], dict[str, l
     {representative seg_id: [other seg_ids]} mapping."""
     unique: list[Segment] = []
     alias: dict[str, list[str]] = {}
-    seen: dict[str, str] = {}
+    seen: dict[tuple[str, str], str] = {}
     for seg in segments:
-        key = seg.text.strip()
+        key = (seg.text.strip(), seg.meta.get("translation_context", "") if seg.meta.get("context_sensitive") else "")
         if key in seen:
             alias.setdefault(seen[key], []).append(seg.seg_id)
         else:

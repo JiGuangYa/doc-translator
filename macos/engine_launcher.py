@@ -12,6 +12,9 @@ from pathlib import Path
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--supervise-child":
+        from app.services.process_supervisor import main as supervise
+        return supervise(sys.argv[2:])
     bootstrap = json.loads(sys.stdin.readline())
     token = bootstrap["token"]
     data_dir = Path(bootstrap["data_dir"]).resolve()
@@ -31,16 +34,18 @@ def main():
     os.environ["DOC_TRANSLATOR_DATA_DIR"] = str(data_dir)
     os.environ["DOC_TRANSLATOR_TASK_TTL_DAYS"] = "0"
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.bind(("127.0.0.1", 0))
+    listener.bind(("127.0.0.1", int(bootstrap.get("port", 0))))
     listener.listen(128)
     port = listener.getsockname()[1]
-    os.environ["PORT"] = str(port)
+    os.environ["DOC_TRANSLATOR_PORT"] = str(port)
+    os.environ["DOC_TRANSLATOR_DESKTOP"] = "1"
+    os.environ.setdefault("DOC_TRANSLATOR_KEYRING_SERVICE", "com.jiguang.doctranslator.preview.providers")
 
     import uvicorn
     from app import desktop
     desktop.configure(token)
     from app.main import app
-    from app.services import renderer, task_manager
+    from app.services import renderer, task_manager, process_runner
     lifespan = app.router.lifespan_context
 
     @asynccontextmanager
@@ -50,7 +55,8 @@ def main():
             try:
                 yield
             finally:
-                task_manager.request_cancel_all()
+                task_manager.begin_shutdown()
+                process_runner.begin_shutdown()
                 renderer.shutdown()
 
     app.router.lifespan_context = desktop_lifespan
@@ -58,11 +64,14 @@ def main():
     def watch_parent():
         # EOF covers normal quit and an unexpected parent crash.
         sys.stdin.read()
-        task_manager.request_cancel_all()
+        task_manager.begin_shutdown()
+        process_runner.begin_shutdown()
         renderer.shutdown()
         os.kill(os.getpid(), signal.SIGTERM)
         # Persisted completed batches survive a blocked provider request.
-        threading.Timer(12, lambda: os._exit(0)).start()
+        watchdog = threading.Timer(165, lambda: os._exit(0))
+        watchdog.daemon = True
+        watchdog.start()
 
     threading.Thread(target=watch_parent, daemon=True).start()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port,

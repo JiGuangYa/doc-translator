@@ -29,7 +29,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-KEYRING_SERVICE = "doc-translator"
+KEYRING_SERVICE = os.environ.get("DOC_TRANSLATOR_KEYRING_SERVICE", "doc-translator")
 _BACKEND: str | None = None  # "keyring" | "fernet"
 
 # Single lock for all secret-store mutations: prevents the

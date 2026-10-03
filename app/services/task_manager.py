@@ -9,10 +9,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .. import store
 
-_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="task")
+_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="task")
 _jobs: dict[str, dict] = {}          # task_id -> runtime state (in-memory)
 _submitted: set[str] = set()         # Submitted but not yet finished — prevents duplicate submission.
 _lock = threading.Lock()
+_shutdown_requested = False
 
 
 def _now() -> str:
@@ -34,12 +35,32 @@ def register(job: dict) -> None:
 
 
 def recover_on_startup() -> None:
-    """Mark tasks in an intermediate state in the store as failed (interrupted by service restart)."""
+    """Preserve queued tasks and mark interrupted work as resumable."""
     for job in store.list_jobs():
         if job.get("status") in ("translating", "parsing", "uploaded"):
-            job["status"] = "failed"
-            job["error"] = "Service restart interrupted the task. You can restart translation (resume supported)."
+            job["status"] = "paused"
+            job["error"] = "The app closed before this task finished. Resume to continue."
             store.save_job(job["task_id"], job)
+
+
+def reset_shutdown() -> None:
+    global _shutdown_requested
+    with _lock:
+        _shutdown_requested = False
+
+
+def begin_shutdown() -> None:
+    global _shutdown_requested
+    with _lock:
+        _shutdown_requested = True
+        for runtime in _jobs.values():
+            if runtime.get("status") == "translating":
+                runtime["cancel_requested"] = True
+
+
+def is_shutdown_requested() -> bool:
+    with _lock:
+        return _shutdown_requested
 
 
 def get_runtime(task_id: str) -> dict | None:
@@ -56,19 +77,18 @@ def update(task_id: str, **fields) -> None:
         rt.update(fields)
 
 
-def request_cancel_all() -> None:
-    with _lock:
-        for rt in _jobs.values():
-            rt["cancel_requested"] = True
-
-
 def request_cancel(task_id: str) -> bool:
     with _lock:
         rt = _jobs.get(task_id)
-        if not rt or rt.get("status") != "translating":
+        if not rt or rt.get("status") not in ("translating", "queued"):
             return False
         rt["cancel_requested"] = True
-        return True
+        queued = rt.get("status") == "queued"
+        if queued:
+            rt["status"] = "cancelled"
+    if queued:
+        persist_status(task_id, status="cancelled", error=None)
+    return True
 
 
 def is_cancel_requested(task_id: str) -> bool:
@@ -96,12 +116,6 @@ def mark_finished(task_id: str) -> None:
         _submitted.discard(task_id)
 
 
-def is_active(task_id: str) -> bool:
-    """Includes queued work and the final export after cancellation."""
-    with _lock:
-        return task_id in _submitted or _jobs.get(task_id, {}).get("status") == "translating"
-
-
 def submit(fn, task_id: str) -> None:
     """Submit a task to the thread pool."""
     _executor.submit(_wrap, fn, task_id)
@@ -111,13 +125,18 @@ def _wrap(fn, task_id: str):
     try:
         fn()
     except Exception as e:  # Safety net: any uncaught exception becomes a failed task.
-        update(task_id, status="failed", error=str(e)[:500])
+        status = "paused" if is_shutdown_requested() else "failed"
+        error = None if status == "paused" else str(e)[:500]
+        update(task_id, status=status, error=error)
         job = store.load_job(task_id)
         if job:
-            job["status"] = "failed"
-            job["error"] = str(e)[:500]
+            job["status"] = status
+            job["error"] = error
             job["updated_at"] = _now()
             store.save_job(task_id, job)
+    finally:
+        # A drained queue means both results and final status are durable.
+        mark_finished(task_id)
 
 
 def persist_status(task_id: str, **fields) -> None:
@@ -147,3 +166,8 @@ def wait_for_drain(timeout_s: float) -> bool:
             return True
         time.sleep(0.5)
     return count_in_flight() == 0
+
+
+def is_active(task_id: str) -> bool:
+    with _lock:
+        return task_id in _submitted

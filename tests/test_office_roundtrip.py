@@ -153,10 +153,13 @@ def test_docx_translate_writeback(tmp_path):
     result = docx_fmt.extract(src, {})
     translations = {f"s{i:06d}": f"【T】{seg.text}" for i, seg in enumerate(result.segments)}
     report = docx_fmt.write_back(src, dst, translations, {})
-    assert report.written == len(result.segments)
+    assert report.written == len(result.segments) - 1  # hyperlink kept intact
+    assert any("hyperlink" in warning for warning in report.warnings)
 
     after = docx_fmt.extract(dst, {})
-    assert [s.text for s in after.segments] == [f"【T】{s.text}" for s in result.segments]
+    assert [s.text for s in after.segments] == [
+        s.text if s.text.startswith("See ") else f"【T】{s.text}"
+        for s in result.segments]
 
 
 def test_docx_real_sample(tmp_path):

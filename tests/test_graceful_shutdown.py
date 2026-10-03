@@ -66,3 +66,21 @@ def test_is_shutting_down_flag():
     main._shutting_down = True
     assert main.is_shutting_down() is True
     main._shutting_down = False
+
+
+def test_drain_waits_until_failure_state_is_saved(monkeypatch):
+    from app import store
+    task_id = "f" * 32
+    store.save_job(task_id, {"task_id": task_id, "filename": "test.docx", "ext": ".docx", "status": "translating"})
+    task_manager.try_mark_submitted(task_id)
+    original_save = store.save_job
+    observed = []
+    def save(task, job):
+        observed.append(task_manager.count_in_flight())
+        original_save(task, job)
+    monkeypatch.setattr(store, "save_job", save)
+    task_manager.begin_shutdown()
+    task_manager._wrap(lambda: (_ for _ in ()).throw(RuntimeError("conversion cancelled")), task_id)
+    assert observed == [1]
+    assert task_manager.count_in_flight() == 0
+    assert store.load_job(task_id)["status"] == "paused"

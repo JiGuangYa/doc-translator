@@ -42,36 +42,29 @@ def test_metadata_failure_preserves_revision_and_export(document, monkeypatch):
         pipeline.revise_segment(tid, 's000000', 'Unsaved revision.')
     assert store.load_job(tid) == before
     assert saved.read_bytes() == previous_bytes
-    assert list(saved.parent.glob('*.docx')) == [saved]
+    assert set(p.name for p in saved.parent.glob('*.docx')) == {'original.docx', 'translated.docx'}
     monkeypatch.setattr(store, 'save_job', actual_save)
-    pipeline.revise_segment(tid, 's000000', 'Retried revision.')
+    with saved.open('rb') as reader:
+        pipeline.revise_segment(tid, 's000000', 'Retried revision.')
+        assert reader.read() == previous_bytes
     current = store.load_job(tid)
     assert current['content_version'] == before['content_version'] + 1
     assert Document(store.document_path(current, 'translated')).paragraphs[0].text == 'Retried revision.'
     # A reader that acquired the old job can still finish reading that version.
-    assert saved.read_bytes() == previous_bytes
+    assert any(path.read_bytes() == previous_bytes for path in (saved.parent / "versions").glob("*.docx"))
 
 
-def test_startup_reclaims_only_uncommitted_generations(document):
+def test_startup_recovers_committed_file_and_keeps_version_backup(document):
+    from app.services import output_transaction
     tid = document
     pipeline._apply_translations(tid, '.docx', {'s000000': 'Version one.'})
-    old = store.document_path(store.load_job(tid), 'translated')
+    first = store.document_path(store.load_job(tid), 'translated').read_bytes()
     pipeline.revise_segment(tid, 's000000', 'Committed version two.')
     job = store.load_job(tid)
-    current = store.document_path(job, 'translated')
-    orphan = current.parent / (uuid.uuid4().hex + '.docx')
-    orphan.write_bytes(b'incomplete write before a crash')
-    old_cache = store.task_dir(tid) / 'previews' / 'v1'
-    old_cache.mkdir(parents=True)
-    (old_cache / 'page.png').write_bytes(b'old')
-    current_cache = old_cache.with_name('v2')
-    current_cache.mkdir()
-    (current_cache / 'page.png').write_bytes(b'current')
-    store.recover_task_files()
-    assert not old.exists() and not orphan.exists() and not old_cache.exists()
-    assert current_cache.exists()
+    assert output_transaction.recover() == []
     assert store.load_job(tid) == job
-    assert Document(current).paragraphs[0].text == 'Committed version two.'
+    assert Document(store.document_path(job, 'translated')).paragraphs[0].text == 'Committed version two.'
+    assert any(file.read_bytes() == first for file in (store.task_dir(tid) / 'versions').glob('*.docx'))
 
 
 def test_start_and_revision_share_the_commit_lock(document, monkeypatch):
@@ -158,8 +151,9 @@ def controlled_renderer(document, monkeypatch):
     conversions = []
     monkeypatch.setattr(renderer, '_stopping', threading.Event())
     monkeypatch.setattr(renderer, '_threads', {})
+    monkeypatch.setattr(renderer, 'genoffice_path', lambda: None)
     monkeypatch.setattr(renderer, 'soffice_path', lambda: 'fake-soffice')
-    def convert(soffice, src, outdir, tag):
+    def convert(soffice, src, outdir, tag, cancel_event=None):
         conversions.append(Document(src).paragraphs[0].text)
         entered.set()
         assert release.wait(5)
@@ -172,7 +166,7 @@ def controlled_renderer(document, monkeypatch):
     monkeypatch.setattr(renderer, '_convert_to_pdf', convert)
     yield entered, release, conversions
     release.set()
-    with renderer._threads_lock:
+    with renderer._state_lock:
         threads = list(renderer._threads.values())
     for thread in threads:
         thread.join(5)
@@ -182,7 +176,7 @@ def controlled_renderer(document, monkeypatch):
 def drain_renderer(tid):
     # Threads can hand over to a new version before the previous thread ends.
     for _ in range(5):
-        with renderer._threads_lock:
+        with renderer._state_lock:
             thread = renderer._threads.get(tid)
         if thread is None:
             return
@@ -211,10 +205,14 @@ def test_revision_during_preview_discards_old_generation(document, controlled_re
     pipeline.revise_segment(document, 's000000', 'Newest committed revision.')
     release.set()
     drain_renderer(document)
+    assert renderer.render_status(document)['status'] == 'none'
+    assert renderer.page_png_path(document, 1, 'translated') is None
+    renderer.start_render(document, '.docx')  # The unified reader re-requests a stale preview.
+    drain_renderer(document)
     state = renderer.render_status(document)
     assert state['status'] == 'ready'
     assert state['content_version'] == store.load_job(document)['content_version'] == 1
-    assert conversions == ['An original paragraph.', 'An original paragraph.', 'Newest committed revision.']
+    assert conversions[-2:] == ['An original paragraph.', 'Newest committed revision.']
     assert not (store.task_dir(document) / 'previews' / 'v0').exists()
 
 

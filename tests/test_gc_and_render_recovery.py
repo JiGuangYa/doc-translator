@@ -46,13 +46,14 @@ def test_render_task_removes_profile(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     tid = _mk_task(tmp_path, "done", time.strftime("%Y-%m-%d %H:%M:%S"))
 
-    def fake_convert(soffice, src, outdir, tag):
+    def fake_convert(soffice, src, outdir, tag, cancel_event=None):
         profile = renderer._profile_dir(tag)
         profile.mkdir(parents=True, exist_ok=True)
         (profile / "user").write_text("lo profile junk")
         return outdir / (src.stem + ".pdf")  # fake pdf -> fitz will fail to open, hitting the exception path
 
     monkeypatch.setattr(renderer, "soffice_path", lambda: "soffice-fake")
+    monkeypatch.setattr(renderer, "genoffice_path", lambda: None)
     monkeypatch.setattr(renderer, "_convert_to_pdf", fake_convert)
 
     renderer._render_task(tid, ".docx")
